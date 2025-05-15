@@ -4,6 +4,7 @@ import {
   createAnnotation as apiCreateAnnotation,
   updateAnnotation as apiUpdateAnnotation,
   deleteAnnotation as apiDeleteAnnotation,
+  setAllAnnotationsForImage,
 } from '../services/annotationService';
 import { useImageStore } from './imageStore';
 
@@ -39,29 +40,29 @@ export const useAnnotationStore = defineStore('annotation', {
       } finally {
         this.loading = false;
       }
-    },
-
-    async createAnnotation(imageId, annotationData, projectId) {
+    },    async createAnnotation(imageId, annotationData, projectId) {
       this.loading = true;
-      this.error = null;
-      try {
-        // apiCreateAnnotation POSTs to `/annotations/image/:imageId/set` 
-        // which expects { boxes: [annotationData] } and returns { message, image, annotations: [createdAnn] }
-        const backendResponse = await apiCreateAnnotation(imageId, annotationData);
+      this.error = null;      try {
+        console.log(`Store: Creating annotation for image: ${imageId}`);
+        // IMPORTANT: The backend endpoint /annotations/image/:imageId/set first DELETES ALL existing annotations
+        // for this image and then creates the new one(s). 
+        // Instead of just sending the new annotation, we'll send all existing ones plus the new one
+        // To ensure latest annotations are preserved correctly in the undo stack, place the new annotation at the end
+        const allAnnotations = [...this.annotations, annotationData];
+        const backendResponse = await setAllAnnotationsForImage(imageId, allAnnotations);
 
         // Check if the backend response structure is as expected and contains the new annotation
         if (backendResponse && backendResponse.annotations && backendResponse.annotations.length > 0) {
+          console.log(`Store: Received ${backendResponse.annotations.length} annotations from server after creation`);
           const newlyCreatedAnnotationFromServer = backendResponse.annotations[0]; // Assuming the first one is ours
 
           if (newlyCreatedAnnotationFromServer && newlyCreatedAnnotationFromServer._id) {
-            // Successfully created and received the annotation from the server.
-            // Add it directly to the local state.
-            const existingIndex = this.annotations.findIndex(a => a._id === newlyCreatedAnnotationFromServer._id);
-            if (existingIndex !== -1) {
-              this.annotations[existingIndex] = newlyCreatedAnnotationFromServer;
-            } else {
-              this.annotations.push(newlyCreatedAnnotationFromServer);
-            }
+            console.log(`Store: Successfully created annotation with ID: ${newlyCreatedAnnotationFromServer._id}`);
+            
+            // Since the backend replaces ALL annotations, we should replace our local collection
+            // to maintain consistency instead of just adding the new annotation
+            this.annotations = backendResponse.annotations;
+            console.log(`Store: Updated local annotations array with server response (${backendResponse.annotations.length} annotations)`);
 
             const imageStore = useImageStore();
             // Update image in imageStore if backend sent it back (it contains updated annotation list and status)
@@ -69,6 +70,7 @@ export const useAnnotationStore = defineStore('annotation', {
                 const imageIndexInStore = imageStore.images.findIndex(img => img._id === backendResponse.image._id);
                 if (imageIndexInStore !== -1) {
                     imageStore.images[imageIndexInStore] = backendResponse.image;
+                    console.log(`Store: Updated image in imageStore with ID: ${backendResponse.image._id}`);
                 } else {
                     // If image not found, maybe it's a new image or list is stale, add it or refetch.
                     // For simplicity here, we could push or decide to refetch all images.
@@ -117,34 +119,43 @@ export const useAnnotationStore = defineStore('annotation', {
       } finally {
         this.loading = false;
       }
-    },
-
-    async updateAnnotation(annotationId, annotationData, projectId, imageId) { // Added imageId for consistency
+    },    async updateAnnotation(annotationId, annotationData, projectId, imageId) { // Added imageId for consistency
       this.loading = true;
       this.error = null;
       try {
+        console.log(`Store: Attempting to update annotation with ID: ${annotationId}`);
+        
+        // First check if the annotation exists in our local state
+        const annotationExists = this.annotations.some(ann => ann._id === annotationId);
+        if (!annotationExists) {
+          console.warn(`Cannot update annotation: Annotation with ID ${annotationId} not found in local store`);
+          this.error = `Annotation with ID: ${annotationId} not found in local store.`;
+          
+          // If imageId is provided, refresh annotations to get current state
+          if (imageId) {
+            console.log(`Refreshing annotations for image ${imageId} since we couldn't find annotation ${annotationId}`);
+            await this.fetchAnnotations(imageId);
+          }
+          return null;
+        }
+        
+        // Proceed with the update
         const updatedAnnotationFromServer = await apiUpdateAnnotation(annotationId, annotationData);
         if (updatedAnnotationFromServer && updatedAnnotationFromServer._id) {
+          console.log(`Store: Successfully updated annotation with ID: ${annotationId}`);
           const index = this.annotations.findIndex(ann => ann._id === annotationId);
           if (index !== -1) {
             this.annotations[index] = { ...this.annotations[index], ...updatedAnnotationFromServer };
           }
 
           // After successful update, update the image in imageStore
-          // Similar to create/delete, the backend might return the updated image or we might need to refetch
-          // For now, let's assume we need to update the image status by refetching its project's images
-          // or by updating a specific image if the backend provides enough info.
           const imageStore = useImageStore();
           if (projectId) { // projectId is crucial for fetching images of a project
             // Option 1: Refetch all images for the project to update statuses
-            // This is simpler but less efficient if only one image status changes.
             await imageStore.fetchImages(projectId);
-
-            // Option 2: If the backend could return the specific updated image (with its new status)
-            // we could update it directly like in createAnnotation.
-            // For now, fetchImages is a safe bet.
+            console.log(`Store: Updated image store for project: ${projectId} after annotation update`);
             
-            // If imageId is also available and reliable, we could potentially fetch just that image.
+            // If imageId is also available, we could potentially fetch just that image
             // if (imageId) { await imageStore.fetchImageById(projectId, imageId); }
           } else {
             console.warn('updateAnnotation: projectId not provided, cannot refresh imageStore effectively.');
@@ -159,15 +170,23 @@ export const useAnnotationStore = defineStore('annotation', {
           return null;
         }
       } catch (error) {
-        this.error = error.response?.data?.message || error.message || 'Failed to update annotation';
-        console.error("Error in store updateAnnotation:", error);
-        // Optionally, refetch to revert optimistic updates if the view relies on it
+        // Handle 404 errors specifically
+        if (error.response && error.response.status === 404) {
+          console.warn(`Store: Annotation with ID: ${annotationId} not found on server (404). Refreshing local state.`);
+          this.error = `Annotation with ID: ${annotationId} not found on server.`;
+        } else {
+          this.error = error.response?.data?.message || error.message || 'Failed to update annotation';
+          console.error("Error in store updateAnnotation:", error);
+        }
+        
+        // Always refresh annotations on error to ensure UI consistency with backend state
         if (imageId) {
-            try {
-                await this.fetchAnnotations(imageId);
-            } catch (fetchError) {
-                console.error("Failed to re-fetch annotations after update error:", fetchError);
-            }
+          try {
+            console.log(`Store: Re-fetching annotations for image: ${imageId} after update error`);
+            await this.fetchAnnotations(imageId);
+          } catch (fetchError) {
+            console.error("Failed to re-fetch annotations after update error:", fetchError);
+          }
         }
         return null;
       } finally {
@@ -179,22 +198,60 @@ export const useAnnotationStore = defineStore('annotation', {
       this.loading = true;
       this.error = null;
       try {
-        await apiDeleteAnnotation(annotationId);
-        // Instead of filtering locally, re-fetch to ensure consistency with backend
-        // this.annotations = this.annotations.filter(ann => ann._id !== annotationId);
-        await this.fetchAnnotations(imageId); 
+        console.log(`Store: Attempting to delete annotation with ID: ${annotationId}`);
+        await apiDeleteAnnotation(annotationId); // Backend deletes the specific annotation
+        console.log(`Store: Successfully deleted annotation with ID: ${annotationId} from server`);
         
+        // Successfully deleted from backend, now update local state
+        const index = this.annotations.findIndex(ann => ann._id === annotationId);
+        if (index !== -1) {
+          this.annotations.splice(index, 1);
+          console.log(`Store: Removed annotation with ID: ${annotationId} from local store`);
+        } else {
+          // If not found, it might have been already removed or list is out of sync.
+          // A targeted fetch might be good here, but for now, this is simpler.
+          console.warn(`Annotation with id ${annotationId} not found in local store for deletion, fetching fresh list.`);
+          await this.fetchAnnotations(imageId); // Fallback to refetch if local removal is problematic
+        }
+        
+        // Update the image status in the image store
         const imageStore = useImageStore();
-        await imageStore.fetchImages(projectId);
+        // We need to update the specific image, or at least its project's list
+        // A simple way is to refetch the image itself or the project's images
+        // For now, let's refetch the project's images to update the status of the current image
+        if (projectId) {
+            await imageStore.fetchImages(projectId);
+            console.log(`Store: Updated image store for project: ${projectId} after annotation deletion`);
+        } else {
+            console.warn("deleteAnnotation: projectId not provided, cannot refresh imageStore effectively.");
+        }
+
         return true;
       } catch (error) {
-        this.error = error.message || 'Failed to delete annotation';
+        // Handle 404 errors more specifically
+        if (error.response && error.response.status === 404) {
+          console.warn(`Store: Annotation with ID: ${annotationId} not found on server (404). Refreshing local state.`);
+          this.error = `Annotation with ID: ${annotationId} not found on server.`;
+        } else {
+          this.error = error.response?.data?.message || error.message || 'Failed to delete annotation';
+          console.error(`Store: Error deleting annotation with ID: ${annotationId}:`, error);
+        }
+        
+        // Always refetch annotations on error to ensure UI consistency with backend state
+        if (imageId) {
+            try {
+                console.log(`Store: Re-fetching annotations for image: ${imageId} after delete error`);
+                await this.fetchAnnotations(imageId);
+            } catch (fetchError) {
+                console.error("Failed to re-fetch annotations after delete error:", fetchError);
+            }
+        }
         return false;
       } finally {
         this.loading = false;
       }
     },
-    
+
     clearAnnotations() {
       this.annotations = [];
       this.error = null;

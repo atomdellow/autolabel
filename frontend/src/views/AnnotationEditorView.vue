@@ -8,11 +8,14 @@
 
     <div class="editor-layout">
       <div class="toolbar">
-        <h3>Tools</h3>
-        <button @click="setTool('rectangle')" :class="{ active: currentTool === 'rectangle' }">Rectangle</button>
+        <h3>Tools</h3>        <button @click="setTool('rectangle')" :class="{ active: currentTool === 'rectangle' }">Rectangle</button>
         <button @click="setTool('pan')" :class="{ active: currentTool === 'pan' }">Pan</button>
-        <button @click="undo" :disabled="!canUndo">Undo</button>
-        <button @click="redo" :disabled="!canRedo">Redo</button>
+        <button @click="undo" :disabled="!canUndo" :title="canUndo ? `Undo ${getUndoActionDescription()}` : 'Nothing to undo'">
+          Undo<span v-if="canUndo"> ({{ undoStack.length }})</span>
+        </button>
+        <button @click="redo" :disabled="!canRedo" :title="canRedo ? `Redo ${getRedoActionDescription()}` : 'Nothing to redo'">
+          Redo<span v-if="canRedo"> ({{ redoStack.length }})</span>
+        </button>
       </div>
 
       <div class="canvas-container" ref="canvasContainerRef">
@@ -29,18 +32,22 @@
             </li>
           </ul>
           <p v-else>No classes defined for this project yet.</p>
-        </div>
-
-        <div class="layers-section">
+        </div>        <div class="layers-section">
           <h4>Layers (Annotations)</h4>
           <ul v-if="annotationStore.currentAnnotations.length">
             <li v-for="(ann, index) in annotationStore.currentAnnotations" :key="ann._id"
                 @mouseover="highlightAnnotation(ann)" @mouseleave="unhighlightAnnotation"
-                :class="{ 'highlighted': highlightedAnnotationId === ann._id, 'editing': editingAnnotationId === ann._id }"
+                :class="{ 
+                  'highlighted': highlightedAnnotationId === ann._id, 
+                  'editing': editingAnnotationId === ann._id,
+                  'has-history': hasAnnotationHistory(ann._id)
+                }"
                 :style="{ borderLeftColor: getColorForClass(ann.label) }">
-              <span>{{ ann.label }} #{{ index + 1 }}</span>
-              <button @click="startEditingAnnotation(ann)" class="edit-ann-btn">Edit</button>
-              <button @click="deleteExistingAnnotation(ann._id)" class="delete-ann-btn">Delete</button>
+              <span>
+                {{ ann.label }} #{{ index + 1 }}
+                <small v-if="hasAnnotationHistory(ann._id)" title="This annotation has undo/redo history" class="history-indicator">★</small>
+              </span>              <button @click="startEditingAnnotation(ann)" class="edit-ann-btn" title="Edit this annotation">Edit</button>
+              <button @click="deleteExistingAnnotation(ann._id)" class="delete-ann-btn" title="Delete this annotation">Delete</button>
             </li>
           </ul>
           <p v-else>No annotations yet.</p>
@@ -89,6 +96,20 @@
 </template>
 
 <script setup>
+/* 
+ * IMPORTANT NOTE ABOUT ANNOTATION WORKFLOW:
+ * 
+ * The backend endpoint used for creating annotations `/api/annotations/image/:imageId/set` first DELETES ALL
+ * existing annotations for the image before saving the new ones. This means:
+ * 
+ * 1. Creating a new annotation will remove all previous annotations for that image on the server
+ * 2. If the frontend store isn't updated correctly, there can be a mismatch between UI state and server state
+ * 3. This can lead to 404 errors when trying to delete annotations that appear in the UI but no longer exist on the server
+ * 
+ * The annotationStore.js has been adjusted to replace the local annotations array with the server response
+ * after creation, and improved error handling for the delete operation.
+ */
+
 import { ref, onMounted, computed, watch, nextTick, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useProjectStore } from '../store/projectStore';
@@ -143,9 +164,59 @@ const originalResizingAnnotation = ref(null); // Annotation state at the start o
 // Undo/Redo state
 const undoStack = ref([]);
 const redoStack = ref([]);
+const MAX_UNDO_HISTORY = 20; // Maximum number of actions in the undo history
+const undoLimitReached = ref(false); // Flag to indicate if the undo history limit has been reached
 
 const canUndo = computed(() => undoStack.value.length > 0);
 const canRedo = computed(() => redoStack.value.length > 0);
+
+// Function to add an action to the undo stack and manage its size
+function addToUndoStack(action) {
+  // Ensure action has a timestamp - use high precision timestamp to avoid ordering issues
+  if (!action.timestamp) {
+    action.timestamp = Date.now() + (performance.now() / 1000); // Add fractional milliseconds for more precise ordering
+  }
+  
+  // Add action to the end of the stack (newest actions at the end)
+  undoStack.value.push(action);
+  undoLimitReached.value = false;
+  
+  // We no longer sort the stack - instead we rely on the natural order of actions
+  // being added to the stack chronologically, which is more reliable for undo/redo
+  
+  // If we exceed the maximum history size, remove the oldest action
+  if (undoStack.value.length > MAX_UNDO_HISTORY) {
+    undoStack.value.shift(); // Remove the oldest action (at index 0)
+    undoLimitReached.value = true;
+    console.log(`Undo history limit reached (${MAX_UNDO_HISTORY} actions). Oldest action removed.`);
+  }
+  
+  // Clear the redo stack when a new action is performed
+  redoStack.value = [];
+  
+  console.log(`Added to undo stack: ${action.type} action with ID ${action.annotationId || (action.annotationData && action.annotationData._id) || 'unknown'}`);
+}
+
+// Function to check if an annotation has history in undo/redo stacks
+function hasAnnotationHistory(annotationId) {
+  if (!annotationId) return false;
+  
+  // Check if this annotation appears in the undo stack
+  const inUndoStack = undoStack.value.some(action => 
+    (action.type === 'CREATE' && action.annotationId === annotationId) ||
+    (action.type === 'UPDATE' && action.annotationId === annotationId) ||
+    (action.type === 'DELETE' && action.annotationData && action.annotationData._id === annotationId)
+  );
+  
+  // Check if this annotation appears in the redo stack
+  const inRedoStack = redoStack.value.some(action => 
+    (action.type === 'CREATE' && action.annotationData && action.annotationData._id === annotationId) ||
+    (action.type === 'UPDATE' && action.annotationId === annotationId) ||
+    (action.type === 'DELETE' && action.annotationData && action.annotationData._id === annotationId)
+  );
+  
+  return inUndoStack || inRedoStack;
+}
 
 // Color utility
 const classColors = ref({});
@@ -566,17 +637,27 @@ function handleMouseUp(event) {
             // and originalResizingAnnotation for the state *before* this specific drag started.
             // For the undo of an UPDATE, we need to revert to the state captured by originalAnnotationBeforeEdit.
             annotationStore.updateAnnotation(editingAnnotationId.value, updateData, projectId.value, imageId.value)
-                .then((updatedAnnFromServer) => {
-                    if (updatedAnnFromServer) {
-                        undoStack.value.push({
+                .then((updatedAnnFromServer) => {                    if (updatedAnnFromServer) {                        // Create a timestamp that will be preserved through undo/redo
+                        const actionTimestamp = Date.now();
+                        
+                        // Add to undo stack using our new function
+                        addToUndoStack({
                             type: 'UPDATE',
                             annotationId: editingAnnotationId.value,
+                            timestamp: actionTimestamp, // Use consistent timestamp for this action
                             oldData: JSON.parse(JSON.stringify(originalAnnotationBeforeEdit.value)), // State before any edits in this session
                             newData: JSON.parse(JSON.stringify(updatedAnnFromServer)) // State after this resize, from server
                         });
-                        redoStack.value = [];
+                        
+                        console.log(`Added UPDATE action to undo stack with timestamp ${new Date(actionTimestamp).toISOString()}`);
+                        
                         // Update originalAnnotationBeforeEdit to the new state for subsequent edits/undos within the same editing session
                         originalAnnotationBeforeEdit.value = JSON.parse(JSON.stringify(updatedAnnFromServer));
+                        
+                        // Show notification if undo limit was reached
+                        if (undoLimitReached.value) {
+                          alert(`Undo history limit reached (${MAX_UNDO_HISTORY} actions). Oldest action removed.`);
+                        }
                     } else {
                         // Handle case where updateAnnotation returns null (e.g. server error, validation error)
                         // Revert the optimistic update made in handleMouseMove
@@ -676,39 +757,57 @@ async function confirmClassInput() {
     return;
   }
   if (pendingAnnotationCoordinates && imageDimensions.value.naturalWidth > 0 && imageDimensions.value.naturalHeight > 0) {
+    const className = currentClassName.value.trim();
+    
+    // First, ensure the class exists in the project 
+    // This ensures class preservation in the UI even if all annotations for a class are later deleted
+    if (projectStore.currentProject && !projectStore.currentProject.classes.includes(className)) {
+      try {
+        console.log(`Adding new class "${className}" to project`);
+        await projectStore.addProjectClass(projectId.value, className);
+      } catch (error) {
+        console.error("Failed to add class to project:", error);
+        // Continue with annotation creation even if class addition failed
+        // The annotation will still have the class label
+      }
+    }
+    
     const annotationDataToSave = {
       x: pendingAnnotationCoordinates.x_canvas / imageDimensions.value.width * imageDimensions.value.naturalWidth,
       y: pendingAnnotationCoordinates.y_canvas / imageDimensions.value.height * imageDimensions.value.naturalHeight,
       width: pendingAnnotationCoordinates.width_canvas / imageDimensions.value.width * imageDimensions.value.naturalWidth,
       height: pendingAnnotationCoordinates.height_canvas / imageDimensions.value.height * imageDimensions.value.naturalHeight,
-      label: currentClassName.value.trim(),
-      // The backend or store should ideally assign a consistent color if not provided.
-      // For now, let's ensure color is part of the initial save for consistency in undo/redo.
-      color: getColorForClass(currentClassName.value.trim()),
-    };
-
-    const newSavedAnnotation = await annotationStore.createAnnotation(imageId.value, annotationDataToSave, projectId.value);
-
+      label: className,
+      // Ensure color consistency by assigning a color before saving
+      color: getColorForClass(className),
+      // Add an id property to help track this annotation in the frontend
+      id: `temp_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+    };    // Create a timestamp for this action that will be preserved throughout undo/redo
+    const actionTimestamp = Date.now();
+    
+    const newSavedAnnotation = await annotationStore.createAnnotation(imageId.value, annotationDataToSave, projectId.value);    
     if (newSavedAnnotation && newSavedAnnotation._id) {
-      // Add to undo stack
-      undoStack.value.push({ 
+      // Add to undo stack using our new function
+      addToUndoStack({ 
         type: 'CREATE', 
-        annotationId: newSavedAnnotation._id, 
-        // Store a deep copy of the data that was used to create it, including the color assigned.
-        // The newSavedAnnotation from server might have more fields (like _id, timestamps)
-        // For re-creation, we need the essential data.
-        annotationData: { ...annotationDataToSave, color: newSavedAnnotation.color || annotationDataToSave.color, _id: newSavedAnnotation._id } 
+        annotationId: newSavedAnnotation._id,
+        timestamp: actionTimestamp, // Use consistent timestamp for this action
+        // Store a deep copy of the data that was used to create it, including the color assigned
+        annotationData: { 
+          ...annotationDataToSave, 
+          color: newSavedAnnotation.color || annotationDataToSave.color, 
+          _id: newSavedAnnotation._id,
+          label: className // Ensure class info is preserved
+        } 
       });
-      redoStack.value = []; // Clear redo stack on new action
-
-      const className = newSavedAnnotation.label;
-      if (projectStore.currentProject && !projectStore.currentProject.classes.includes(className)) {
-        try {
-          await projectStore.addProjectClass(projectId.value, className);
-        } catch (error) {
-          console.error("Failed to add class to project:", error);
-          // Non-critical for annotation itself, but log it.
-        }
+        console.log(`Successfully created annotation with class "${className}" and ID ${newSavedAnnotation._id} at timestamp ${new Date(actionTimestamp).toISOString()}`);
+      
+      // Ensure UI is fully synchronized with backend
+      await debouncedRefreshAnnotations();
+      
+      // Show notification if undo limit was reached
+      if (undoLimitReached.value) {
+        alert(`Undo history limit reached (${MAX_UNDO_HISTORY} actions). Oldest action removed.`);
       }
     } else {
       alert("Failed to save annotation. Please try again. The returned annotation was not valid.");
@@ -742,104 +841,480 @@ async function deleteExistingAnnotation(annotationIdToDelete) {
 
   // Create a deep copy for the undo stack BEFORE deleting
   const annotationDataCopy = JSON.parse(JSON.stringify(annotationToDelete));
-
+  
+  // Save class info before deletion for potential class count updates
+  const deletedClass = annotationToDelete.label;
+  const classCountBeforeDeletion = countAnnotationsByClass(deletedClass);
+  
   if (confirm('Are you sure you want to delete this annotation?')) {
-    const success = await annotationStore.deleteAnnotation(annotationIdToDelete, imageId.value, projectId.value);
-    if (success) {
-      undoStack.value.push({ type: 'DELETE', annotationData: annotationDataCopy });
-      redoStack.value = [];
-    } else {
-      alert("Failed to delete annotation from server.");
+    try {
+      console.log(`Attempting to delete annotation with ID: ${annotationIdToDelete}`);
+      const success = await annotationStore.deleteAnnotation(annotationIdToDelete, imageId.value, projectId.value);
+      
+      if (success) {
+        console.log(`Successfully deleted annotation with ID: ${annotationIdToDelete}`);
+        
+      // Create a timestamp that we'll preserve through any undo/redo operations
+        const actionTimestamp = Date.now();
+        
+        // Add to undo stack using our new function
+        addToUndoStack({ 
+          type: 'DELETE', 
+          annotationData: annotationDataCopy,
+          timestamp: actionTimestamp // Use consistent timestamp for tracking
+        });
+        
+        console.log(`Added DELETE action to undo stack with timestamp ${new Date(actionTimestamp).toISOString()}`);
+        
+        // Ensure classes are preserved in UI even when all annotations of a class are deleted
+        // This allows users to select the class for future annotations
+        // The check ensures we only trigger class updates when the last instance of a class is deleted
+        if (classCountBeforeDeletion === 1 && projectStore.currentProject?.classes) {
+          // Class is still in project definition, so we don't need to do anything
+          // Just log for debugging
+          console.log(`Deleted last annotation for class "${deletedClass}" but class is preserved in project definition`);
+        }
+        
+        // Show notification if undo limit was reached
+        if (undoLimitReached.value) {
+          alert(`Undo history limit reached (${MAX_UNDO_HISTORY} actions). Oldest action removed.`);
+        }      } else {
+        // This branch is hit when deleteAnnotation returns false (API error)
+        console.warn(`Could not delete annotation with ID: ${annotationIdToDelete}, but it may have been removed from the UI via re-fetch`);
+        alert("Failed to delete annotation from server, but the UI has been updated with the current state.");
+        
+        // Force a refresh of annotations to ensure UI matches server state
+        await debouncedRefreshAnnotations();
+      }
+    } catch (error) {
+      console.error(`Error in deleteExistingAnnotation for ID: ${annotationIdToDelete}`, error);      alert("An error occurred while deleting the annotation. The UI will be refreshed to show the current state.");
+      
+      // Force a refresh of annotations to ensure UI matches server state
+      await debouncedRefreshAnnotations();
     }
     // redrawCanvas will be triggered by store update
   }
 }
 
+// Variables for debounced refresh
+let refreshTimeout = null;
+const REFRESH_DELAY = 300; // milliseconds
+
+// Function to refresh annotations with debouncing
+async function debouncedRefreshAnnotations() {
+  // Clear any existing timeout
+  if (refreshTimeout) {
+    clearTimeout(refreshTimeout);
+  }
+  
+  // Set a new timeout
+  refreshTimeout = setTimeout(async () => {
+    console.log("Performing debounced refresh of annotations");
+    await annotationStore.fetchAnnotations(imageId.value);
+    refreshTimeout = null;
+  }, REFRESH_DELAY);
+}
+
+// Debug helper function to log undo/redo stacks
+function logStackState() {
+  console.log('==== UNDO/REDO STACK STATE ====');
+  console.log(`Undo stack (${undoStack.value.length}):`);
+  // Sort temporarily for logging purposes (doesn't affect the actual stack)
+  const sortedUndoStack = [...undoStack.value].sort((a, b) => b.timestamp - a.timestamp);
+  sortedUndoStack.forEach((a, i) => {
+    const actionInfo = a.annotationId ? 
+      `${a.type} [ID: ${a.annotationId}] ${a.annotationData?.label || ''}` : 
+      `${a.type} ${a.annotationData?._id ? '[ID: ' + a.annotationData._id + ']' : ''} ${a.annotationData?.label || ''}`;
+    console.log(`  ${i}: ${actionInfo} @ ${new Date(a.timestamp).toISOString()} (${a.timestamp})`);
+  });
+  
+  console.log(`Redo stack (${redoStack.value.length}):`);
+  const sortedRedoStack = [...redoStack.value].sort((a, b) => b.timestamp - a.timestamp);
+  sortedRedoStack.forEach((a, i) => {
+    const actionInfo = a.annotationId ? 
+      `${a.type} [ID: ${a.annotationId}] ${a.annotationData?.label || ''}` : 
+      `${a.type} ${a.annotationData?._id ? '[ID: ' + a.annotationData._id + ']' : ''} ${a.annotationData?.label || ''}`;
+    console.log(`  ${i}: ${actionInfo} @ ${new Date(a.timestamp).toISOString()} (${a.timestamp})`);
+  });
+  console.log('==============================');
+}
+
+// Helper functions to provide descriptions for undo/redo actions
+function getUndoActionDescription() {
+  if (undoStack.value.length === 0) return '';
+  
+  const action = undoStack.value[undoStack.value.length - 1];
+  switch (action.type) {
+    case 'CREATE':
+      return 'creation of annotation';
+    case 'DELETE':
+      return 'deletion of annotation';
+    case 'UPDATE':
+      return 'update to annotation';
+    default:
+      return 'last action';
+  }
+}
+
+function getRedoActionDescription() {
+  if (redoStack.value.length === 0) return '';
+  
+  const action = redoStack.value[redoStack.value.length - 1];
+  switch (action.type) {
+    case 'CREATE':
+      return 'creation of annotation';
+    case 'DELETE':
+      return 'deletion of annotation';
+    case 'UPDATE':
+      return 'update to annotation';
+    default:
+      return 'last action';
+  }
+}
+
 async function undo() {
   if (!canUndo.value) return;
+  
+  logStackState(); // Log stack state before undo
+    // Get the most recent action (from the end of the stack)
+  // Sort the stack by timestamp to ensure newest actions are undone first
+  undoStack.value.sort((a, b) => b.timestamp - a.timestamp);
   const action = undoStack.value.pop();
+  console.log("Undoing action:", action.type, "with timestamp:", new Date(action.timestamp).toISOString(), "action details:", action);
 
-  if (action.type === 'CREATE') {
-    // Undo creation means deleting the annotation
-    const success = await annotationStore.deleteAnnotation(action.annotationId, imageId.value, projectId.value);
-    if (success) {
-      redoStack.value.push(action); // Original action can be redone
-    } else {
-      undoStack.value.push(action); // Push back if failed
-      alert("Undo failed: Could not delete the annotation.");
-    }
-  } else if (action.type === 'DELETE') {
-    // Undo deletion means re-creating the annotation
-    // Ensure _id is not part of the data sent for creation
-    const { _id, ...dataToRecreate } = action.annotationData;
-    const newAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
-    if (newAnnotation && newAnnotation._id) {
-      // For redo, we need to know the ID of the annotation that was just re-created to delete it again.
-      redoStack.value.push({ type: 'DELETE', annotationData: { ...dataToRecreate, _id: newAnnotation._id } });
-    } else {
-      undoStack.value.push(action); // Push back if failed
-      alert("Undo failed: Could not re-create the annotation.");
-    }
-  } else if (action.type === 'UPDATE') {
-    // Undo update means reverting to oldData
-    // The backend update should use action.oldData but exclude _id from the payload body, using annotationId in URL
-    const { _id, ...updatePayload } = action.oldData; // _id is part of oldData, but not sent in payload
-    const success = await annotationStore.updateAnnotation(action.annotationId, updatePayload, projectId.value);
-    if (success) {
-      // For redo, we need to push an UPDATE action with oldData being current (action.oldData) and newData being action.newData
-      redoStack.value.push(action); 
-      // Update originalAnnotationBeforeEdit to reflect the undone state if user continues editing
-      if (editingAnnotationId.value === action.annotationId) {
-        originalAnnotationBeforeEdit.value = JSON.parse(JSON.stringify(action.oldData));
+  try {
+    if (action.type === 'CREATE') {
+      // Undo creation means deleting the annotation
+      const annotationId = action.annotationId;
+      
+      // Check if the annotation still exists before trying to delete it
+      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
+      if (!annotationExists) {
+        console.warn(`Cannot undo creation: annotation with ID ${annotationId} no longer exists`);
+        // Make sure UI is updated by refreshing annotations from server
+        await debouncedRefreshAnnotations();
+        return;
       }
-    } else {
-      undoStack.value.push(action);
-      alert("Undo failed: Could not update the annotation to its previous state.");
+      
+      // Save a copy of the annotation data before deleting (for redo)
+      const annotationToDelete = annotationStore.currentAnnotations.find(ann => ann._id === annotationId);
+      if (!annotationToDelete) {
+        console.error("Annotation not found in store despite existing check passing");
+        return;
+      }
+      
+      const annotationDataCopy = JSON.parse(JSON.stringify(annotationToDelete));
+      
+      // Log annotation being deleted
+      console.log(`Undoing creation of annotation: ${annotationId}`, annotationToDelete.label);
+      
+      const success = await annotationStore.deleteAnnotation(annotationId, imageId.value, projectId.value);
+      if (success) {
+        console.log("Successfully deleted annotation during undo");
+        
+        // Store the complete annotation data for potential redo
+        redoStack.value.push({
+          type: 'CREATE',
+          annotationData: annotationDataCopy,
+          timestamp: action.timestamp // Preserve the original timestamp
+        });
+        
+        // Make sure UI is updated by refreshing annotations from server
+        await debouncedRefreshAnnotations();
+      } else {
+        // Push back if failed - at the end of the stack to maintain chronological order
+        undoStack.value.push(action);
+        alert("Undo failed: Could not delete the annotation.");
+        
+        // Refresh annotations from server to ensure UI is in sync
+        await debouncedRefreshAnnotations();
+      }
+    } else if (action.type === 'DELETE') {
+      // Undo deletion means re-creating the annotation
+      // Ensure _id is not part of the data sent for creation
+      const { _id, ...dataToRecreate } = action.annotationData;
+      
+      // Preserve the original class and color
+      const className = dataToRecreate.label;
+      console.log("Recreating deleted annotation with class:", className);
+      
+      // Ensure the color matches the class
+      dataToRecreate.color = getColorForClass(className);
+      
+      const newAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
+      if (newAnnotation && newAnnotation._id) {
+        console.log("Successfully recreated annotation with ID:", newAnnotation._id);
+        
+        // For redo, we need to know the ID of the annotation that was just re-created to delete it again
+        redoStack.value.push({ 
+          type: 'DELETE', 
+          timestamp: action.timestamp, // Preserve the original timestamp
+          annotationData: { 
+            ...dataToRecreate, 
+            _id: newAnnotation._id,
+            color: newAnnotation.color || dataToRecreate.color,
+            label: className // Ensure class info is preserved 
+          } 
+        });
+        
+        // Make sure UI is updated
+        await debouncedRefreshAnnotations();
+      } else {
+        undoStack.value.push(action); // Push back if failed
+        alert("Undo failed: Could not re-create the annotation.");
+        await debouncedRefreshAnnotations();
+      }
+    } else if (action.type === 'UPDATE') {
+      // Undo update means reverting to oldData
+      const annotationId = action.annotationId;
+      
+      // Check if the annotation still exists
+      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
+      if (!annotationExists) {
+        console.warn(`Cannot undo update: annotation with ID ${annotationId} no longer exists`);
+        // Instead of trying to update, we should recreate the annotation
+        const { _id, ...dataToRecreate } = action.oldData;
+        console.log("Recreating annotation instead of updating");
+        
+        const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
+        if (reCreatedAnnotation && reCreatedAnnotation._id) {
+          console.log("Successfully recreated annotation with ID:", reCreatedAnnotation._id);
+          
+          // For redo, we need to use the new ID
+          redoStack.value.push({ 
+            type: 'DELETE',
+            timestamp: action.timestamp, // Preserve the original timestamp
+            annotationData: { 
+              ...dataToRecreate, 
+              _id: reCreatedAnnotation._id,
+              color: reCreatedAnnotation.color || dataToRecreate.color,
+              label: dataToRecreate.label // Ensure class info is preserved
+            } 
+          });
+          
+          // Ensure UI state is in sync with backend
+          await debouncedRefreshAnnotations();
+        } else {
+          alert("Undo failed: Could not recreate the annotation to its previous state.");
+          // Ensure UI state is in sync with backend
+          await debouncedRefreshAnnotations();
+        }
+        return;
+      }
+      
+      // Normal update flow if annotation exists
+      const { _id, ...updatePayload } = action.oldData;
+      const success = await annotationStore.updateAnnotation(annotationId, updatePayload, projectId.value, imageId.value);
+      if (success) {
+        console.log("Successfully updated annotation during undo");
+        
+        // For redo, we need to push an UPDATE action with oldData being current (action.oldData) and newData being action.newData
+        redoStack.value.push({
+          type: 'UPDATE',
+          annotationId: annotationId,
+          timestamp: action.timestamp, // Preserve the original timestamp
+          oldData: action.oldData,
+          newData: action.newData
+        });
+        
+        // Update originalAnnotationBeforeEdit to reflect the undone state if user continues editing
+        if (editingAnnotationId.value === annotationId) {
+          originalAnnotationBeforeEdit.value = JSON.parse(JSON.stringify(action.oldData));
+        }
+        
+        // Ensure UI state is in sync with backend
+        await debouncedRefreshAnnotations();
+      } else {
+        undoStack.value.push(action);
+        alert("Undo failed: Could not update the annotation to its previous state.");
+        
+        // Ensure UI state is in sync with backend
+        await debouncedRefreshAnnotations();
+      }
     }
+  } catch (error) {
+    console.error("Error occurred during undo operation:", error);
+    // Push the action back to the stack if there was an error
+    undoStack.value.push(action);
+    alert("An error occurred during the undo operation. Please try again.");
+    
+    // Make sure UI is in sync with the backend
+    await debouncedRefreshAnnotations();
   }
-  // redrawCanvas will be triggered by store updates
+  
+  // Log stack state after undo
+  logStackState();
 }
 
 async function redo() {
   if (!canRedo.value) return;
+    logStackState(); // Log stack state before redo
+  
+  // Sort the stack by timestamp to ensure newest actions are redone first
+  redoStack.value.sort((a, b) => b.timestamp - a.timestamp);
   const action = redoStack.value.pop();
+  console.log("Redo action:", action.type, "with timestamp:", new Date(action.timestamp).toISOString());
 
-  if (action.type === 'CREATE') { // Redo creation
-    // The annotationData in a CREATE action on redoStack is the one that was originally created.
-    // We need to remove its _id if it's there, as createAnnotation expects data without an _id.
-    const { _id, ...dataToRecreate } = action.annotationData;
-    const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
-    if (reCreatedAnnotation && reCreatedAnnotation._id) {
-      // Push the original action (now with the new _id) back to undo stack
-      undoStack.value.push({ type: 'CREATE', annotationId: reCreatedAnnotation._id, annotationData: { ...dataToRecreate, _id: reCreatedAnnotation._id } });
-    } else {
-      redoStack.value.push(action); // Push back if failed
-      alert("Redo failed: Could not re-create the annotation.");
-    }
-  } else if (action.type === 'DELETE') { // Redo deletion
-    // The annotationData in a DELETE action on redoStack contains the _id of the annotation to be deleted.
-    const success = await annotationStore.deleteAnnotation(action.annotationData._id, imageId.value, projectId.value);
-    if (success) {
-      undoStack.value.push(action); // Push original action (which was to delete) to undo
-    } else {
-      redoStack.value.push(action); // Push back if failed
-      alert("Redo failed: Could not delete the annotation.");
-    }
-  } else if (action.type === 'UPDATE') {
-    // Redo update means applying newData
-    const { _id, ...updatePayload } = action.newData; // _id is part of newData, but not sent in payload
-    const success = await annotationStore.updateAnnotation(action.annotationId, updatePayload, projectId.value);
-    if (success) {
-      undoStack.value.push(action); // Push the original UPDATE action (oldData, newData) to undo
-      // Update originalAnnotationBeforeEdit to reflect the redone state if user continues editing
-      if (editingAnnotationId.value === action.annotationId) {
-        originalAnnotationBeforeEdit.value = JSON.parse(JSON.stringify(action.newData));
+  try {
+    if (action.type === 'CREATE') { // Redo creation
+      // The annotationData in a CREATE action on redoStack is the one that was originally created.
+      // We need to remove its _id if it's there, as createAnnotation expects data without an _id.
+      const { _id, ...dataToRecreate } = action.annotationData;
+      
+      // Preserve the original class and color
+      const className = dataToRecreate.label;
+      console.log("Recreating annotation with class:", className);
+      
+      // Make sure to set the color to match the original class
+      dataToRecreate.color = getColorForClass(className);
+      
+      // Create a new annotation using the original data
+      const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
+      if (reCreatedAnnotation && reCreatedAnnotation._id) {
+        console.log("Successfully recreated annotation with ID:", reCreatedAnnotation._id, "using timestamp:", new Date(action.timestamp).toISOString());
+          
+        // Push new CREATE action to undo stack with the new ID
+        undoStack.value.push({ 
+          type: 'CREATE', 
+          annotationId: reCreatedAnnotation._id,
+          timestamp: action.timestamp, // Preserve the original timestamp exactly for consistent chronology
+          annotationData: { 
+            ...dataToRecreate, 
+            color: reCreatedAnnotation.color || dataToRecreate.color, 
+            _id: reCreatedAnnotation._id,
+            label: className // Ensure class info is preserved
+          }
+        });
+      } else {
+        redoStack.value.push(action); // Push back if failed
+        alert("Redo failed: Could not re-create the annotation.");
+        
+        // Ensure UI state is in sync with backend
+        await debouncedRefreshAnnotations();
       }
-    } else {
-      redoStack.value.push(action);
-      alert("Redo failed: Could not update the annotation to its next state.");
+    } else if (action.type === 'DELETE') { // Redo deletion
+      // The annotationData in a DELETE action on redoStack contains the _id of the annotation to be deleted.
+      const annotationId = action.annotationData._id;
+      
+      // Verify that the annotation exists before trying to delete it
+      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
+      if (!annotationExists) {
+        console.warn(`Cannot redo deletion: annotation with ID ${annotationId} no longer exists`);
+        // Skip this action since the annotation is already gone
+        
+        // Ensure UI state is in sync with backend
+        await debouncedRefreshAnnotations();
+        return;
+      }
+      
+      // Save a copy of the annotation data before deleting (for potential future use)
+      const annotationToDelete = annotationStore.currentAnnotations.find(ann => ann._id === annotationId);
+      if (!annotationToDelete) {
+        console.error("Annotation not found in store despite existing check passing");
+        return;
+      }
+      
+      const annotationDataCopy = JSON.parse(JSON.stringify(annotationToDelete));
+      
+      const success = await annotationStore.deleteAnnotation(annotationId, imageId.value, projectId.value);
+      if (success) {      
+        console.log("Successfully deleted annotation during redo");
+        // Ensure UI state is in sync with backend
+        await debouncedRefreshAnnotations();
+        
+        // Push original action to undo with timestamp preserved
+        undoStack.value.push({ 
+          type: 'DELETE',
+          annotationData: action.annotationData,
+          timestamp: action.timestamp // Preserve the exact timestamp for consistent chronology
+        });
+        
+        console.log(`Added DELETE action back to undo stack with timestamp ${new Date(action.timestamp).toISOString()}`);
+      } else {
+        redoStack.value.push(action); // Push back if failed
+        alert("Redo failed: Could not delete the annotation.");
+        
+        // Ensure UI state is in sync with backend
+        await debouncedRefreshAnnotations();
+      }
+    } else if (action.type === 'UPDATE') {
+      // Redo update means applying newData
+      const annotationId = action.annotationId;
+      
+      // Check if the annotation still exists
+      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
+      if (!annotationExists) {
+        console.warn(`Cannot redo update: annotation with ID ${annotationId} no longer exists`);
+        // Instead of trying to update, we should recreate the annotation
+        const { _id, ...dataToRecreate } = action.newData;
+        console.log("Recreating annotation instead of updating");
+        
+        const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
+        if (reCreatedAnnotation && reCreatedAnnotation._id) {
+          console.log("Successfully recreated annotation with ID:", reCreatedAnnotation._id);
+          // Push new CREATE action to undo stack
+          undoStack.value.push({ 
+            type: 'CREATE', 
+            annotationId: reCreatedAnnotation._id,
+            timestamp: action.timestamp, // Preserve the original timestamp
+            annotationData: { 
+              ...dataToRecreate, 
+              _id: reCreatedAnnotation._id,
+              color: reCreatedAnnotation.color || dataToRecreate.color,
+              label: dataToRecreate.label // Ensure class info is preserved
+            } 
+          });
+        } else {
+          alert("Redo failed: Could not recreate the updated annotation.");
+          
+          // Ensure UI state is in sync with backend
+          await debouncedRefreshAnnotations();
+        }
+        return;
+      }
+      
+      // Normal update flow if annotation exists
+      const { _id, ...updatePayload } = action.newData;
+      const success = await annotationStore.updateAnnotation(annotationId, updatePayload, projectId.value, imageId.value);
+      if (success) {
+        console.log("Successfully updated annotation during redo with timestamp:", new Date(action.timestamp).toISOString());
+        
+        // Push the UPDATE action to undo with its timestamp preserved exactly as it was
+        undoStack.value.push({ 
+          type: 'UPDATE',
+          annotationId: annotationId,
+          timestamp: action.timestamp, // Preserve the exact timestamp for consistent chronology
+          oldData: action.oldData,
+          newData: action.newData
+        });
+        
+        console.log(`Added UPDATE action back to undo stack with timestamp ${new Date(action.timestamp).toISOString()}`);
+        
+        // Update originalAnnotationBeforeEdit to reflect the redone state if user continues editing
+        if (editingAnnotationId.value === annotationId) {
+          originalAnnotationBeforeEdit.value = JSON.parse(JSON.stringify(action.newData));
+        }
+      } else {
+        redoStack.value.push(action);
+        alert("Redo failed: Could not update the annotation to its next state.");
+        
+        // Ensure UI state is in sync with backend
+        await debouncedRefreshAnnotations();
+      }
     }
+  } catch (error) {
+    console.error("Error occurred during redo operation:", error);
+    // Push the action back to the stack if there was an error
+    redoStack.value.push(action);
+    alert("An error occurred during the redo operation. Please try again.");
+    
+    // Make sure UI is in sync with the backend
+    await debouncedRefreshAnnotations();
   }
+  
+  // Log stack state after redo
+  logStackState();
+  
   // redrawCanvas will be triggered by store updates
 }
 
@@ -931,6 +1406,12 @@ function setTool(toolName) {
 
 function selectClass(className) {
   console.log("Selected class:", className);
+  // Set the current class name for new annotations
+  currentClassName.value = className;
+  // If the class modal is open, this will immediately apply the selected class
+  if (showClassModal.value) {
+    confirmClassInput();
+  }
 }
 
 function countAnnotationsByClass(className) {
@@ -940,6 +1421,7 @@ function countAnnotationsByClass(className) {
 function highlightAnnotation(annotation) {
     highlightedAnnotationId.value = annotation._id;
 }
+
 function unhighlightAnnotation() {
     highlightedAnnotationId.value = null;
 }
@@ -1077,31 +1559,24 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
   text-align: left;
   border-radius: 3px;
 }
+
 .toolbar button.active {
-  background-color: #007bff;
-  color: white;
-  border-color: #007bff;
-}
-.toolbar button:disabled {
-    background-color: #eee;
-    color: #999;
-    cursor: not-allowed;
+  background-color: #e6f0ff;
+  font-weight: bold;
+  border-color: #aac;
 }
 
 .canvas-container {
   flex-grow: 1;
   position: relative;
-  border: 1px solid #ccc;
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  min-height: 300px;
+  background-color: #f0f0f0;
   overflow: hidden;
-  background-color: #e9e9e9;
-}
-
-.canvas-container img {
-  display: block;
-  object-fit: contain;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .canvas-container canvas {
@@ -1149,9 +1624,16 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
 .side-panel li.editing {
   outline: 2px solid #007bff; /* Style for the item being edited */
 }
+.side-panel li.has-history {
+  background-color: #f0f8ff; /* Very light blue background for items with history */
+}
 .side-panel li div { /* Container for buttons */
   display: flex;
   gap: 5px;
+}
+.history-indicator {
+  color: gold;
+  margin-left: 3px;
 }
 .side-panel li button {
   padding: 3px 6px;
@@ -1271,58 +1753,42 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
 }
 
 .tag-pill {
-  background-color: #007bff;
-  color: white;
-  padding: 4px 10px;
-  border-radius: 15px;
-  font-size: 0.85em;
   display: inline-flex;
   align-items: center;
-  white-space: nowrap;
+  background-color: #e1f5fe;
+  padding: 3px 8px;
+  border-radius: 12px;
+  margin: 3px;
+  font-size: 0.8em;
 }
 
 .remove-tag-btn {
   background: none;
   border: none;
-  color: white;
-  margin-left: 6px;
+  color: #999;
+  margin-left: 4px;
   cursor: pointer;
-  font-size: 1.2em;
-  padding: 0;
-  line-height: 1;
-  font-weight: bold;
+  font-size: 1em;
 }
 
 .remove-tag-btn:hover {
-  opacity: 0.8;
+  color: #f44;
 }
 
 .add-tag-input {
   display: flex;
-  gap: 8px;
-  margin-bottom: 5px;
+  margin-top: 8px;
 }
 
-.add-tag-input input[type="text"] {
+.add-tag-input input {
   flex-grow: 1;
-  padding: 8px;
-  border: 1px solid #ccc;
-  border-radius: 3px;
-  font-size: 0.9em;
+  padding: 4px;
+  border: 1px solid #ddd;
+  border-radius: 4px 0 0 4px;
 }
 
 .add-tag-input button {
-  padding: 8px 12px;
-  background-color: #28a745;
-  color: white;
-  border: none;
-  border-radius: 3px;
-  cursor: pointer;
-  font-size: 0.9em;
-}
-
-.add-tag-input button:hover {
-  background-color: #218838;
+  border-radius: 0 4px 4px 0;
 }
 
 .error {
