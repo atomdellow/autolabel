@@ -115,7 +115,8 @@ const imageDimensions = ref({ width: 0, height: 0, naturalWidth: 0, naturalHeigh
 const currentTool = ref('rectangle'); // 'rectangle', 'pan'
 const drawing = ref(false);
 const startPos = ref({ x: 0, y: 0 });
-const currentRect = ref(null); // { x, y, width, height }
+const currentRectRaw = ref(null); // Stores the raw x,y,width,height of the rectangle being drawn
+// const currentRect = ref(null); // Replaced by currentRectRaw for clarity
 
 const viewOffset = ref({ x: 0, y: 0 });
 const isPanning = ref(false);
@@ -124,7 +125,7 @@ const panLastClientPos = ref({ x: 0, y: 0 });
 const showClassModal = ref(false);
 const currentClassName = ref('');
 const classModalError = ref('');
-let pendingAnnotation = null;
+let pendingAnnotationCoordinates = null; // Stores {x_canvas, y_canvas, width_canvas, height_canvas}
 
 const highlightedAnnotationId = ref(null);
 const showRawData = ref(false);
@@ -186,15 +187,16 @@ onMounted(async () => {
     ctx = canvasRef.value.getContext('2d');
   }
 
+  // Ensure undo/redo stacks are reset when component mounts or image changes
+  undoStack.value = [];
+  redoStack.value = [];
+
   const container = canvasContainerRef.value;
   if (container) {
     const resizeObserver = new ResizeObserver(onImageLoad);
     resizeObserver.observe(container);
     onUnmounted(() => resizeObserver.disconnect());
   }
-
-  undoStack.value = [];
-  redoStack.value = [];
 });
 
 const onImageLoad = () => {
@@ -236,7 +238,11 @@ const onImageLoad = () => {
 };
 
 watch(() => annotationStore.currentAnnotations, () => {
-  redrawCanvas();
+  // Only redraw if not actively drawing a new rectangle,
+  // as handleMouseMove will handle its own drawing updates.
+  if (!drawing.value) {
+    redrawCanvas();
+  }
 }, { deep: true });
 
 function getMousePos(event) {
@@ -259,39 +265,42 @@ function handleMouseDown(event) {
   } else if (currentTool.value === 'rectangle' && ctx) {
     drawing.value = true;
     startPos.value = getMousePos(event);
-    currentRect.value = { 
-        x: startPos.value.x, 
-        y: startPos.value.y, 
-        width: 0, 
-        height: 0 
+    currentRectRaw.value = {
+        x: startPos.value.x,
+        y: startPos.value.y,
+        width: 0,
+        height: 0
     };
-    event.preventDefault();
+    // No need to preventDefault if we are not interfering with other browser behavior like text selection.
+    // event.preventDefault(); 
   }
 }
 
 function handleMouseMove(event) {
-  if (drawing.value && currentRect.value && ctx && currentTool.value === 'rectangle') {
+  if (drawing.value && currentRectRaw.value && ctx && currentTool.value === 'rectangle') {
     const mousePos = getMousePos(event);
-    currentRect.value.width = mousePos.x - startPos.value.x;
-    currentRect.value.height = mousePos.y - startPos.value.y;
-    redrawCanvas();
-    drawRect(currentRect.value, 'rgba(255, 0, 0, 0.5)');
+    currentRectRaw.value.width = mousePos.x - startPos.value.x;
+    currentRectRaw.value.height = mousePos.y - startPos.value.y;
+    redrawCanvas(); // Redraw existing annotations
+    drawRect(currentRectRaw.value, 'rgba(255, 0, 0, 0.5)'); // Draw the current rectangle being drawn
   }
 }
 
 function handleMouseUp(event) {
   if (event.button !== 0) return;
 
-  if (drawing.value && currentRect.value && currentTool.value === 'rectangle') {
+  if (drawing.value && currentRectRaw.value && currentTool.value === 'rectangle') {
     drawing.value = false;
 
-    const x = Math.min(currentRect.value.x, currentRect.value.x + currentRect.value.width);
-    const y = Math.min(currentRect.value.y, currentRect.value.y + currentRect.value.height);
-    const width = Math.abs(currentRect.value.width);
-    const height = Math.abs(currentRect.value.height);
+    const x = Math.min(currentRectRaw.value.x, currentRectRaw.value.x + currentRectRaw.value.width);
+    const y = Math.min(currentRectRaw.value.y, currentRectRaw.value.y + currentRectRaw.value.height);
+    const width = Math.abs(currentRectRaw.value.width);
+    const height = Math.abs(currentRectRaw.value.height);
+
+    currentRectRaw.value = null; // Clear the raw drawing rectangle
 
     if (width > 5 && height > 5) {
-      pendingAnnotation = {
+      pendingAnnotationCoordinates = { // Store coordinates for potential saving
         x_canvas: x,
         y_canvas: y,
         width_canvas: width,
@@ -300,16 +309,16 @@ function handleMouseUp(event) {
       currentClassName.value = '';
       classModalError.value = '';
       showClassModal.value = true;
+      // The rectangle will be drawn by redrawCanvas using pendingAnnotationCoordinates
     }
-    currentRect.value = null;
-    redrawCanvas();
+    redrawCanvas(); // Redraw with the finalized (or about to be finalized) rectangle
   }
 }
 
 function handleMouseLeave(event) {
   if (drawing.value && currentTool.value === 'rectangle') {
     drawing.value = false;
-    currentRect.value = null;
+    currentRectRaw.value = null;
     redrawCanvas();
   }
 }
@@ -354,40 +363,56 @@ async function confirmClassInput() {
     classModalError.value = 'Class name cannot be empty.';
     return;
   }
-  if (pendingAnnotation && imageDimensions.value.naturalWidth > 0 && imageDimensions.value.naturalHeight > 0) {
-    const annotationData = {
-      x: pendingAnnotation.x_canvas / imageDimensions.value.width * imageDimensions.value.naturalWidth,
-      y: pendingAnnotation.y_canvas / imageDimensions.value.height * imageDimensions.value.naturalHeight,
-      width: pendingAnnotation.width_canvas / imageDimensions.value.width * imageDimensions.value.naturalWidth,
-      height: pendingAnnotation.height_canvas / imageDimensions.value.height * imageDimensions.value.naturalHeight,
+  if (pendingAnnotationCoordinates && imageDimensions.value.naturalWidth > 0 && imageDimensions.value.naturalHeight > 0) {
+    const annotationDataToSave = {
+      x: pendingAnnotationCoordinates.x_canvas / imageDimensions.value.width * imageDimensions.value.naturalWidth,
+      y: pendingAnnotationCoordinates.y_canvas / imageDimensions.value.height * imageDimensions.value.naturalHeight,
+      width: pendingAnnotationCoordinates.width_canvas / imageDimensions.value.width * imageDimensions.value.naturalWidth,
+      height: pendingAnnotationCoordinates.height_canvas / imageDimensions.value.height * imageDimensions.value.naturalHeight,
       label: currentClassName.value.trim(),
+      // The backend or store should ideally assign a consistent color if not provided.
+      // For now, let's ensure color is part of the initial save for consistency in undo/redo.
       color: getColorForClass(currentClassName.value.trim()),
     };
 
-    const newSavedAnnotation = await annotationStore.createAnnotation(imageId.value, annotationData, projectId.value);
+    const newSavedAnnotation = await annotationStore.createAnnotation(imageId.value, annotationDataToSave, projectId.value);
 
-    if (newSavedAnnotation) {
+    if (newSavedAnnotation && newSavedAnnotation._id) {
+      // Add to undo stack
+      undoStack.value.push({ 
+        type: 'CREATE', 
+        annotationId: newSavedAnnotation._id, 
+        // Store a deep copy of the data that was used to create it, including the color assigned.
+        // The newSavedAnnotation from server might have more fields (like _id, timestamps)
+        // For re-creation, we need the essential data.
+        annotationData: { ...annotationDataToSave, color: newSavedAnnotation.color || annotationDataToSave.color, _id: newSavedAnnotation._id } 
+      });
+      redoStack.value = []; // Clear redo stack on new action
+
       const className = newSavedAnnotation.label;
       if (projectStore.currentProject && !projectStore.currentProject.classes.includes(className)) {
         try {
           await projectStore.addProjectClass(projectId.value, className);
         } catch (error) {
           console.error("Failed to add class to project:", error);
+          // Non-critical for annotation itself, but log it.
         }
       }
     } else {
-      alert("Failed to save annotation. Please try again.");
+      alert("Failed to save annotation. Please try again. The returned annotation was not valid.");
+      console.error("Failed to save annotation, newSavedAnnotation:", newSavedAnnotation);
     }
   }
   showClassModal.value = false;
-  pendingAnnotation = null;
+  pendingAnnotationCoordinates = null;
   currentClassName.value = '';
   classModalError.value = '';
+  redrawCanvas(); // Ensure canvas is up-to-date
 }
 
 function cancelClassInput() {
   showClassModal.value = false;
-  pendingAnnotation = null;
+  pendingAnnotationCoordinates = null; // Clear the pending rectangle
   currentClassName.value = '';
   classModalError.value = '';
   redrawCanvas();
@@ -398,35 +423,95 @@ async function deleteExistingAnnotation(annotationIdToDelete) {
 
   const annotationToDelete = annotationStore.currentAnnotations.find(ann => ann._id === annotationIdToDelete);
   if (!annotationToDelete) {
-    console.warn("Annotation to delete not found in store");
+    console.warn("Annotation to delete not found in store:", annotationIdToDelete);
+    alert("Error: Annotation not found. It might have been already deleted.");
     return;
   }
 
+  // Create a deep copy for the undo stack BEFORE deleting
+  const annotationDataCopy = JSON.parse(JSON.stringify(annotationToDelete));
+
   if (confirm('Are you sure you want to delete this annotation?')) {
     const success = await annotationStore.deleteAnnotation(annotationIdToDelete, imageId.value, projectId.value);
-    if (!success) {
+    if (success) {
+      undoStack.value.push({ type: 'DELETE', annotationData: annotationDataCopy });
+      redoStack.value = [];
+    } else {
       alert("Failed to delete annotation from server.");
     }
+    // redrawCanvas will be triggered by store update
   }
 }
 
 async function undo() {
   if (!canUndo.value) return;
-  console.warn("Undo for persisted actions is complex and not fully implemented in this simplified version.");
+  const action = undoStack.value.pop();
+
+  if (action.type === 'CREATE') {
+    // Undo creation means deleting the annotation
+    const success = await annotationStore.deleteAnnotation(action.annotationId, imageId.value, projectId.value);
+    if (success) {
+      redoStack.value.push(action); // Original action can be redone
+    } else {
+      undoStack.value.push(action); // Push back if failed
+      alert("Undo failed: Could not delete the annotation.");
+    }
+  } else if (action.type === 'DELETE') {
+    // Undo deletion means re-creating the annotation
+    // Ensure _id is not part of the data sent for creation
+    const { _id, ...dataToRecreate } = action.annotationData;
+    const newAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
+    if (newAnnotation && newAnnotation._id) {
+      // For redo, we need to know the ID of the annotation that was just re-created to delete it again.
+      redoStack.value.push({ type: 'DELETE', annotationData: { ...dataToRecreate, _id: newAnnotation._id } });
+    } else {
+      undoStack.value.push(action); // Push back if failed
+      alert("Undo failed: Could not re-create the annotation.");
+    }
+  }
+  // redrawCanvas will be triggered by store updates
 }
 
 async function redo() {
   if (!canRedo.value) return;
-  console.warn("Redo for persisted actions is complex and not fully implemented in this simplified version.");
+  const action = redoStack.value.pop();
+
+  if (action.type === 'CREATE') { // Redo creation
+    // The annotationData in a CREATE action on redoStack is the one that was originally created.
+    // We need to remove its _id if it's there, as createAnnotation expects data without an _id.
+    const { _id, ...dataToRecreate } = action.annotationData;
+    const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
+    if (reCreatedAnnotation && reCreatedAnnotation._id) {
+      // Push the original action (now with the new _id) back to undo stack
+      undoStack.value.push({ type: 'CREATE', annotationId: reCreatedAnnotation._id, annotationData: { ...dataToRecreate, _id: reCreatedAnnotation._id } });
+    } else {
+      redoStack.value.push(action); // Push back if failed
+      alert("Redo failed: Could not re-create the annotation.");
+    }
+  } else if (action.type === 'DELETE') { // Redo deletion
+    // The annotationData in a DELETE action on redoStack contains the _id of the annotation to be deleted.
+    const success = await annotationStore.deleteAnnotation(action.annotationData._id, imageId.value, projectId.value);
+    if (success) {
+      undoStack.value.push(action); // Push original action (which was to delete) to undo
+    } else {
+      redoStack.value.push(action); // Push back if failed
+      alert("Redo failed: Could not delete the annotation.");
+    }
+  }
+  // redrawCanvas will be triggered by store updates
 }
 
 function redrawCanvas() {
   if (!ctx || !canvasRef.value || !imageDimensions.value.width) return;
   ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height);
 
+  // Draw all saved annotations
   annotationStore.currentAnnotations.forEach(ann => {
-    if (!ann.label || !ann._id) return;
-    const color = getColorForClass(ann.label);
+    if (!ann.label || (!ann._id && !ann.id)) { // Check for ann.id if _id is not yet assigned (e.g. optimistic update)
+        // console.warn("Skipping drawing annotation due to missing label or id:", ann);
+        return;
+    }
+    const color = ann.color || getColorForClass(ann.label); // Use annotation's own color if available
     const displayRect = {
         x: ann.x / imageDimensions.value.naturalWidth * imageDimensions.value.width,
         y: ann.y / imageDimensions.value.naturalHeight * imageDimensions.value.height,
@@ -434,11 +519,20 @@ function redrawCanvas() {
         height: ann.height / imageDimensions.value.naturalHeight * imageDimensions.value.height,
     };
     drawRect(displayRect, color, ann.label);
-    if (ann._id === highlightedAnnotationId.value) {
+    if (ann._id === highlightedAnnotationId.value) { // Use _id for highlighting
         drawRect(displayRect, 'rgba(255, 255, 0, 0.7)', null, true);
     }
   });
-}
+
+  // Draw the rectangle that is pending class assignment (if any)
+  if (pendingAnnotationCoordinates) {
+    drawRect({
+        x: pendingAnnotationCoordinates.x_canvas,
+        y: pendingAnnotationCoordinates.y_canvas,
+        width: pendingAnnotationCoordinates.width_canvas,
+        height: pendingAnnotationCoordinates.height_canvas
+    }, 'rgba(0, 0, 255, 0.5)'); // Draw pending with a different color
+}}
 
 function drawRect(rect, color = 'red', label = null, isHighlight = false) {
   if (!ctx || !rect) return;
@@ -530,7 +624,7 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
         currentTool.value = 'rectangle';
         isPanning.value = false;
         drawing.value = false;
-        currentRect.value = null;
+        currentRectRaw.value = null;
         undoStack.value = [];
         redoStack.value = [];
         window.removeEventListener('mousemove', handlePanMove);
