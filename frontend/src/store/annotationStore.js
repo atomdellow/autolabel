@@ -119,18 +119,56 @@ export const useAnnotationStore = defineStore('annotation', {
       }
     },
 
-    async updateAnnotation(annotationId, annotationData, imageId, projectId) {
+    async updateAnnotation(annotationId, annotationData, projectId, imageId) { // Added imageId for consistency
       this.loading = true;
       this.error = null;
       try {
-        const updatedAnnotation = await apiUpdateAnnotation(annotationId, annotationData);
-        const index = this.annotations.findIndex(ann => ann._id === annotationId);
-        if (index !== -1) {
-          this.annotations[index] = updatedAnnotation;
+        const updatedAnnotationFromServer = await apiUpdateAnnotation(annotationId, annotationData);
+        if (updatedAnnotationFromServer && updatedAnnotationFromServer._id) {
+          const index = this.annotations.findIndex(ann => ann._id === annotationId);
+          if (index !== -1) {
+            this.annotations[index] = { ...this.annotations[index], ...updatedAnnotationFromServer };
+          }
+
+          // After successful update, update the image in imageStore
+          // Similar to create/delete, the backend might return the updated image or we might need to refetch
+          // For now, let's assume we need to update the image status by refetching its project's images
+          // or by updating a specific image if the backend provides enough info.
+          const imageStore = useImageStore();
+          if (projectId) { // projectId is crucial for fetching images of a project
+            // Option 1: Refetch all images for the project to update statuses
+            // This is simpler but less efficient if only one image status changes.
+            await imageStore.fetchImages(projectId);
+
+            // Option 2: If the backend could return the specific updated image (with its new status)
+            // we could update it directly like in createAnnotation.
+            // For now, fetchImages is a safe bet.
+            
+            // If imageId is also available and reliable, we could potentially fetch just that image.
+            // if (imageId) { await imageStore.fetchImageById(projectId, imageId); }
+          } else {
+            console.warn('updateAnnotation: projectId not provided, cannot refresh imageStore effectively.');
+          }
+
+          return updatedAnnotationFromServer;
+        } else {
+          console.error("Backend returned malformed data on update for annotationId:", annotationId, updatedAnnotationFromServer);
+          this.error = "Failed to update annotation: malformed server response.";
+          // Optionally, refetch the specific annotation or all annotations for the image to ensure consistency
+          if (imageId) await this.fetchAnnotations(imageId);
+          return null;
         }
-        return updatedAnnotation;
       } catch (error) {
-        this.error = error.message || 'Failed to update annotation';
+        this.error = error.response?.data?.message || error.message || 'Failed to update annotation';
+        console.error("Error in store updateAnnotation:", error);
+        // Optionally, refetch to revert optimistic updates if the view relies on it
+        if (imageId) {
+            try {
+                await this.fetchAnnotations(imageId);
+            } catch (fetchError) {
+                console.error("Failed to re-fetch annotations after update error:", fetchError);
+            }
+        }
         return null;
       } finally {
         this.loading = false;
