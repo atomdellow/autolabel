@@ -40,7 +40,59 @@ export const useAnnotationStore = defineStore('annotation', {
       } finally {
         this.loading = false;
       }
-    },    async createAnnotation(imageId, annotationData, projectId) {
+    },
+    
+    async setAllAnnotationsForImage(imageId, annotationsArray, projectId) {
+      this.loading = true;
+      this.error = null;
+      
+      try {
+        console.log(`Store: Setting all annotations for image: ${imageId} (${annotationsArray.length} annotations)`);
+        const backendResponse = await setAllAnnotationsForImage(imageId, annotationsArray);
+        
+        if (backendResponse && backendResponse.annotations) {
+          console.log(`Store: Received ${backendResponse.annotations.length} annotations from server after setting all`);
+          
+          // Update the local annotations with the server response
+          this.annotations = backendResponse.annotations;
+          
+          // Update image in imageStore if needed
+          const imageStore = useImageStore();
+          if (projectId) {
+            await imageStore.fetchImages(projectId);
+          } else if (backendResponse.image && backendResponse.image._id) {
+            const imageIndexInStore = imageStore.images.findIndex(img => img._id === backendResponse.image._id);
+            if (imageIndexInStore !== -1) {
+                imageStore.images[imageIndexInStore] = backendResponse.image;
+            }
+          }
+          
+          return backendResponse;
+        } else {
+          console.error("Backend response was not in the expected format { annotations: [...] } or service call failed.", backendResponse);
+          this.error = "Failed to set annotations or server response was malformed.";
+          await this.fetchAnnotations(imageId);
+          return null;
+        }
+      } catch (error) {
+        this.error = error.response?.data?.message || error.message || 'Failed to set annotations';
+        console.error("Error in store setAllAnnotationsForImage:", error);
+        
+        // Try to refresh annotations on error
+        if (imageId) {
+          try {
+            await this.fetchAnnotations(imageId);
+          } catch (fetchError) {
+            console.error("Failed to re-fetch annotations after setting all annotations error:", fetchError);
+          }
+        }
+        return null;
+      } finally {
+        this.loading = false;
+      }
+    },
+    
+    async createAnnotation(imageId, annotationData, projectId) {
       this.loading = true;
       this.error = null;      try {
         console.log(`Store: Creating annotation for image: ${imageId}`);

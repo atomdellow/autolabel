@@ -8,8 +8,8 @@ const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json()); // for parsing application/json
-app.use(express.urlencoded({ extended: true })); // for parsing application/x-www-form-urlencoded
+app.use(express.json({ limit: '50mb' })); // Increased limit for large base64 images
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Increased limit for large base64 images
 
 // Import Routes
 const authRoutes = require('./routes/authRoutes');
@@ -17,6 +17,7 @@ const projectRoutes = require('./routes/projectRoutes');
 const imageRoutes = require('./routes/imageRoutes'); // Added this line
 const annotationRoutes = require('./routes/annotationRoutes'); // Already added in a previous step, ensure it's here
 const trainingRoutes = require('./routes/trainingRoutes'); // Import training routes
+const detectionRoutes = require('./routes/detectionRoutes'); // Import detection routes
 
 // Mount Routes
 app.use('/api/auth', authRoutes);
@@ -24,6 +25,7 @@ app.use('/api/projects', projectRoutes); // Ensuring this is active
 app.use('/api/images', imageRoutes);
 app.use('/api/annotations', annotationRoutes); // Ensure this is mounted
 app.use('/api/training', trainingRoutes); // Mount training routes
+app.use('/api/detection', detectionRoutes); // Mount detection routes
 
 // Serve static files from the 'uploads' directory
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));

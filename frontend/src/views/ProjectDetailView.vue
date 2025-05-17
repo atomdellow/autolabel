@@ -269,12 +269,34 @@ const handleFileSelect = (event) => {
 
 const handleImageUpload = async () => {
   if (!selectedFiles.value.length || !projectStore.currentProject?._id) return;
-  const success = await imageStore.uploadImage(projectStore.currentProject._id, selectedFiles.value); // Pass array of files
-  if (success) {
-    uploadSuccessMessage.value = `${selectedFiles.value.length} image(s) uploaded successfully!`;
-    selectedFiles.value = [];
-    const fileInput = document.querySelector('input[type="file"]');
-    if (fileInput) fileInput.value = '';
+  
+  try {
+    console.log(`Uploading ${selectedFiles.value.length} image(s) for project ${projectStore.currentProject._id}`);
+    
+    // Create a FormData object to hold the files
+    const formData = new FormData();
+    
+    // Append each file to the FormData object
+    for (const file of selectedFiles.value) {
+      console.log(`Adding file to FormData: ${file.name}, size: ${file.size}, type: ${file.type}`);
+      formData.append('image', file); // 'image' should match the field name expected by the backend
+    }
+    
+    // Pass the FormData object to the store method
+    const success = await imageStore.uploadImage(projectStore.currentProject._id, formData);
+    
+    if (success) {
+      uploadSuccessMessage.value = `${selectedFiles.value.length} image(s) uploaded successfully!`;
+      selectedFiles.value = [];
+      const fileInput = document.querySelector('input[type="file"]');
+      if (fileInput) fileInput.value = '';
+    } else {
+      console.error('Upload failed but no error was thrown:', imageStore.error);
+      uploadSuccessMessage.value = `Upload failed: ${imageStore.error || 'Unknown error'}`;
+    }
+  } catch (error) {
+    console.error('Error during image upload:', error);
+    uploadSuccessMessage.value = `Upload failed: ${error.message || 'Unknown error'}`;
   }
 };
 

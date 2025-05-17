@@ -42,11 +42,22 @@ const imageSchema = new mongoose.Schema({
     uploadedAt: {
         type: Date,
         default: Date.now
-    },
-    // Roboflow-like fields from example (can be expanded)
+    },    // Roboflow-like fields from example (can be expanded)
     sourceData: {
         type: Map,
         of: mongoose.Schema.Types.Mixed // To store flexible JSON structure
+    },
+    // Metadata for image processing and troubleshooting
+    metadata: {
+        fileSize: Number,
+        mimeType: String,
+        uploadDate: Date,
+        detectionAttempts: {
+            type: Number,
+            default: 0
+        },
+        lastDetectionDate: Date,
+        detectionErrors: [String]
     }
 });
 

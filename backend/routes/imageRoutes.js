@@ -5,8 +5,9 @@ const {
     getImagesForProject,
     getImageById,
     deleteImage,
-    updateImageTags, // Import the new controller function
+    updateImageTags,
 } = require('../controllers/imageController');
+const { updateImageMetadata } = require('../controllers/imageMetadataController');
 const { protect } = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware'); // Multer upload middleware
 
@@ -27,5 +28,8 @@ router.route('/:imageId')
 
 // Route to update tags for a specific image
 router.put('/:imageId/tags', updateImageTags);
+
+// Route to update image metadata
+router.put('/:imageId/metadata', updateImageMetadata);
 
 module.exports = router;

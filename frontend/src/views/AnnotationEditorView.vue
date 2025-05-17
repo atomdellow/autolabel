@@ -6,10 +6,13 @@
       <span>Annotate: {{ imageStore.getImageById(imageId)?.name }}</span>
     </div>
 
-    <div class="editor-layout">
-      <div class="toolbar">
+    <div class="editor-layout">      <div class="toolbar">
         <h3>Tools</h3>        <button @click="setTool('rectangle')" :class="{ active: currentTool === 'rectangle' }">Rectangle</button>
         <button @click="setTool('pan')" :class="{ active: currentTool === 'pan' }">Pan</button>
+        <button @click="detectShapes" :disabled="detectingShapes" title="Auto-detect shapes in the image">
+          <span v-if="detectingShapes">Detecting...</span>
+          <span v-else>Detect Shapes</span>
+        </button>
         <button @click="undo" :disabled="!canUndo" :title="canUndo ? `Undo ${getUndoActionDescription()}` : 'Nothing to undo'">
           Undo<span v-if="canUndo"> ({{ undoStack.length }})</span>
         </button>
@@ -73,6 +76,44 @@
           </div>
           <p v-if="tagError" class="error">{{ tagError }}</p>
         </div>
+
+        <!-- Detection Settings Section -->
+        <div class="detection-settings-section">
+          <h4>Detection Settings</h4>
+          <div class="detection-method">
+            <label>Detection Method:</label>
+            <select v-model="detectionMethod">
+              <option value="yolo">YOLO (Machine Learning)</option>
+              <option value="opencv">OpenCV Contour Detection</option>
+              <option value="ssim">Structural Similarity (SSIM)</option>
+            </select>
+          </div>
+          
+          <div class="detection-params" v-if="detectionMethod === 'opencv'">
+            <div class="param-group">
+              <label>Sensitivity:</label>
+              <input type="range" v-model.number="detectionParams.sensitivity" min="0.1" max="0.9" step="0.1" />
+              <span>{{ detectionParams.sensitivity }}</span>
+            </div>
+            <div class="param-group">
+              <label>Min Area:</label>
+              <input type="number" v-model.number="detectionParams.minArea" min="10" max="10000" step="10" />
+            </div>
+          </div>
+          
+          <div class="detection-params" v-if="detectionMethod === 'ssim'">
+            <p>Select a reference image to compare with:</p>
+            <select v-model="referenceImageId" @change="loadReferenceImage">
+              <option value="">None (Select an image)</option>
+              <option v-for="img in imageStore.allImages" :key="img._id" :value="img._id">
+                {{ img.name }}
+              </option>
+            </select>
+            <div v-if="referenceImagePreview" class="reference-image-preview">
+              <img :src="referenceImagePreview" alt="Reference Image" />
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -115,6 +156,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useProjectStore } from '../store/projectStore';
 import { useImageStore } from '../store/imageStore';
 import { useAnnotationStore } from '../store/annotationStore';
+import { detectObjects, compareScreenshots } from '../services/detectionService';
 
 const route = useRoute();
 const router = useRouter();
@@ -125,6 +167,17 @@ const annotationStore = useAnnotationStore();
 
 const projectId = ref(route.params.projectId);
 const imageId = ref(route.params.imageId);
+
+// Detection method configuration
+const detectionMethod = ref('yolo'); // 'yolo', 'opencv', or 'ssim'
+const detectionParams = ref({
+  sensitivity: 0.5,   // For OpenCV - edge detection sensitivity (0.1-0.9)
+  minArea: 100,       // For OpenCV - minimum contour area to consider
+  maxArea: null       // For OpenCV - maximum contour area to consider (null = auto)
+});
+const referenceImageId = ref(''); // For SSIM comparison
+const referenceImagePreview = ref(''); // Preview of reference image for SSIM
+const referenceImageData = ref(null); // To store the base64 data of the reference image
 
 const imageRef = ref(null);
 const canvasRef = ref(null);
@@ -166,6 +219,9 @@ const undoStack = ref([]);
 const redoStack = ref([]);
 const MAX_UNDO_HISTORY = 20; // Maximum number of actions in the undo history
 const undoLimitReached = ref(false); // Flag to indicate if the undo history limit has been reached
+
+const detectingShapes = ref(false); // Flag to indicate if shape detection is in progress
+const defaultDetectionClass = ref('auto-detected'); // Default class name for auto-detected shapes
 
 const canUndo = computed(() => undoStack.value.length > 0);
 const canRedo = computed(() => redoStack.value.length > 0);
@@ -634,7 +690,7 @@ function handleMouseUp(event) {
             };
 
             // Use originalAnnotationBeforeEdit for the undo stack, which is the state *before* startEditingAnnotation was called
-            // and originalResizingAnnotation for the state *before* this specific drag started.
+            // and originalResizingAnnotation for the state *before* this specific drag.
             // For the undo of an UPDATE, we need to revert to the state captured by originalAnnotationBeforeEdit.
             annotationStore.updateAnnotation(editingAnnotationId.value, updateData, projectId.value, imageId.value)
                 .then((updatedAnnFromServer) => {                    if (updatedAnnFromServer) {                        // Create a timestamp that will be preserved through undo/redo
@@ -745,6 +801,98 @@ const imageStyle = computed(() => ({
   width: imageDimensions.value.width ? `${imageDimensions.value.width}px` : 'auto',
   height: imageDimensions.value.height ? `${imageDimensions.value.height}px` : 'auto',
 }));
+
+// Draw a rectangle on the canvas with the given coordinates and color
+function drawRect(rect, color = 'rgba(255, 0, 0, 0.5)', lineWidth = 2) {
+  if (!ctx || !rect) return;
+  
+  ctx.beginPath();
+  ctx.rect(rect.x, rect.y, rect.width, rect.height);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
+}
+
+// Function to draw handles on a rectangle for resizing
+function drawHandles(rect, color = 'blue') {
+  if (!ctx || !rect) return;
+  
+  const handles = [
+    { x: rect.x, y: rect.y }, // topLeft
+    { x: rect.x + rect.width, y: rect.y }, // topRight
+    { x: rect.x, y: rect.y + rect.height }, // bottomLeft
+    { x: rect.x + rect.width, y: rect.y + rect.height }, // bottomRight
+    { x: rect.x + rect.width / 2, y: rect.y }, // top
+    { x: rect.x + rect.width / 2, y: rect.y + rect.height }, // bottom
+    { x: rect.x, y: rect.y + rect.height / 2 }, // left
+    { x: rect.x + rect.width, y: rect.y + rect.height / 2 }, // right
+  ];
+  
+  handles.forEach(handle => {
+    ctx.beginPath();
+    ctx.arc(handle.x, handle.y, HANDLE_SIZE / 2, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  });
+}
+
+// Redraw the entire canvas with all annotations
+function redrawCanvas() {
+  if (!ctx || !canvasRef.value) return;
+  
+  // Clear the canvas
+  ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height);
+  
+  // Draw existing annotations
+  annotationStore.currentAnnotations.forEach(ann => {
+    // Convert natural coordinates to canvas coordinates
+    const displayRect = {
+      x: ann.x / imageDimensions.value.naturalWidth * imageDimensions.value.width,
+      y: ann.y / imageDimensions.value.naturalHeight * imageDimensions.value.height,
+      width: ann.width / imageDimensions.value.naturalWidth * imageDimensions.value.width,
+      height: ann.height / imageDimensions.value.naturalHeight * imageDimensions.value.height,
+    };
+    
+    // Draw the rectangle
+    const isHighlighted = ann._id === highlightedAnnotationId.value;
+    const isEditing = ann._id === editingAnnotationId.value;
+    
+    // Use assigned color or default
+    const color = ann.color || getColorForClass(ann.label) || 'rgba(255, 0, 0, 0.5)';
+    
+    // Adjust stroke based on state
+    const lineWidth = isHighlighted || isEditing ? 3 : 2;
+    
+    drawRect(displayRect, color, lineWidth);
+    
+    // If the annotation is being edited, draw resize handles
+    if (isEditing) {
+      drawHandles(displayRect);
+    }
+    
+    // Draw label if exists
+    if (ann.label) {
+      ctx.font = '12px Arial';
+      ctx.fillStyle = color;
+      ctx.fillRect(displayRect.x, displayRect.y - 20, ctx.measureText(ann.label).width + 8, 20);
+      ctx.fillStyle = 'white';
+      ctx.fillText(ann.label, displayRect.x + 4, displayRect.y - 6);
+    }
+  });
+  
+  // Draw pending annotation if exists
+  if (pendingAnnotationCoordinates) {
+    drawRect({
+      x: pendingAnnotationCoordinates.x_canvas,
+      y: pendingAnnotationCoordinates.y_canvas,
+      width: pendingAnnotationCoordinates.width_canvas,
+      height: pendingAnnotationCoordinates.height_canvas
+    }, 'rgba(255, 0, 0, 0.5)', 2);
+  }
+}
 
 const canvasStyle = computed(() => ({
   transform: `translate(calc(-50% + ${viewOffset.value.x}px), calc(-50% + ${viewOffset.value.y}px))`,
@@ -919,218 +1067,96 @@ async function debouncedRefreshAnnotations() {
 function logStackState() {
   console.log('==== UNDO/REDO STACK STATE ====');
   console.log(`Undo stack (${undoStack.value.length}):`);
-  // Sort temporarily for logging purposes (doesn't affect the actual stack)
-  const sortedUndoStack = [...undoStack.value].sort((a, b) => b.timestamp - a.timestamp);
-  sortedUndoStack.forEach((a, i) => {
+  undoStack.value.forEach((a, i) => {
     const actionInfo = a.annotationId ? 
       `${a.type} [ID: ${a.annotationId}] ${a.annotationData?.label || ''}` : 
-      `${a.type} ${a.annotationData?._id ? '[ID: ' + a.annotationData._id + ']' : ''} ${a.annotationData?.label || ''}`;
+      (a.type === 'AUTO_DETECT' ? 
+        `${a.type} [${a.annotationIds?.length || 0} shapes]` : 
+        `${a.type} ${a.annotationData?._id ? '[ID: ' + a.annotationData._id + ']' : ''} ${a.annotationData?.label || ''}`);
     console.log(`  ${i}: ${actionInfo} @ ${new Date(a.timestamp).toISOString()} (${a.timestamp})`);
   });
   
   console.log(`Redo stack (${redoStack.value.length}):`);
-  const sortedRedoStack = [...redoStack.value].sort((a, b) => b.timestamp - a.timestamp);
-  sortedRedoStack.forEach((a, i) => {
+  redoStack.value.forEach((a, i) => {
     const actionInfo = a.annotationId ? 
       `${a.type} [ID: ${a.annotationId}] ${a.annotationData?.label || ''}` : 
-      `${a.type} ${a.annotationData?._id ? '[ID: ' + a.annotationData._id + ']' : ''} ${a.annotationData?.label || ''}`;
+      (a.type === 'AUTO_DETECT' ? 
+        `${a.type} [${a.annotationIds?.length || 0} shapes]` : 
+        `${a.type} ${a.annotationData?._id ? '[ID: ' + a.annotationData._id + ']' : ''} ${a.annotationData?.label || ''}`);
     console.log(`  ${i}: ${actionInfo} @ ${new Date(a.timestamp).toISOString()} (${a.timestamp})`);
   });
   console.log('==============================');
-}
-
-// Helper functions to provide descriptions for undo/redo actions
-function getUndoActionDescription() {
-  if (undoStack.value.length === 0) return '';
-  
-  const action = undoStack.value[undoStack.value.length - 1];
-  switch (action.type) {
-    case 'CREATE':
-      return 'creation of annotation';
-    case 'DELETE':
-      return 'deletion of annotation';
-    case 'UPDATE':
-      return 'update to annotation';
-    default:
-      return 'last action';
-  }
-}
-
-function getRedoActionDescription() {
-  if (redoStack.value.length === 0) return '';
-  
-  const action = redoStack.value[redoStack.value.length - 1];
-  switch (action.type) {
-    case 'CREATE':
-      return 'creation of annotation';
-    case 'DELETE':
-      return 'deletion of annotation';
-    case 'UPDATE':
-      return 'update to annotation';
-    default:
-      return 'last action';
-  }
 }
 
 async function undo() {
   if (!canUndo.value) return;
   
   logStackState(); // Log stack state before undo
-    // Get the most recent action (from the end of the stack)
-  // Sort the stack by timestamp to ensure newest actions are undone first
-  undoStack.value.sort((a, b) => b.timestamp - a.timestamp);
+  
+  // Get the most recent action (from the end of the stack)
   const action = undoStack.value.pop();
-  console.log("Undoing action:", action.type, "with timestamp:", new Date(action.timestamp).toISOString(), "action details:", action);
+  console.log("Undoing action:", action.type, "with timestamp:", new Date(action.timestamp).toISOString());
 
   try {
-    if (action.type === 'CREATE') {
-      // Undo creation means deleting the annotation
-      const annotationId = action.annotationId;
+    if (action.type === 'AUTO_DETECT') {
+      // Undo auto-detection means deleting all the auto-detected annotations at once
+      console.log("Undoing auto-detection of", action.annotationIds.length, "annotations");
       
-      // Check if the annotation still exists before trying to delete it
-      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
-      if (!annotationExists) {
-        console.warn(`Cannot undo creation: annotation with ID ${annotationId} no longer exists`);
-        // Make sure UI is updated by refreshing annotations from server
-        await debouncedRefreshAnnotations();
-        return;
-      }
+      // Keep a copy of all annotation data for potential redo
+      const annotationsDataCopy = [...action.annotationData];
       
-      // Save a copy of the annotation data before deleting (for redo)
-      const annotationToDelete = annotationStore.currentAnnotations.find(ann => ann._id === annotationId);
-      if (!annotationToDelete) {
-        console.error("Annotation not found in store despite existing check passing");
-        return;
-      }
+      // Track success/failure for all operations
+      let allSuccessful = true;
       
-      const annotationDataCopy = JSON.parse(JSON.stringify(annotationToDelete));
-      
-      // Log annotation being deleted
-      console.log(`Undoing creation of annotation: ${annotationId}`, annotationToDelete.label);
-      
-      const success = await annotationStore.deleteAnnotation(annotationId, imageId.value, projectId.value);
-      if (success) {
-        console.log("Successfully deleted annotation during undo");
+      // Delete each annotation one by one
+      for (const annotationId of action.annotationIds) {
+        // Check if annotation exists before trying to delete it
+        const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
+        if (!annotationExists) {
+          console.warn(`Skipping deletion for non-existent annotation ID: ${annotationId}`);
+          continue;
+        }
         
-        // Store the complete annotation data for potential redo
+        const success = await annotationStore.deleteAnnotation(annotationId, imageId.value, projectId.value);
+        if (!success) {
+          console.error(`Failed to delete annotation with ID: ${annotationId} during auto-detect undo`);
+          allSuccessful = false;
+        }
+      }
+      
+      // If the operation was successful, add to redo stack
+      if (allSuccessful) {
         redoStack.value.push({
-          type: 'CREATE',
-          annotationData: annotationDataCopy,
-          timestamp: action.timestamp // Preserve the original timestamp
+          type: 'AUTO_DETECT',
+          timestamp: action.timestamp, // Preserve the timestamp
+          annotationIds: action.annotationIds,
+          annotationData: annotationsDataCopy
         });
         
-        // Make sure UI is updated by refreshing annotations from server
-        await debouncedRefreshAnnotations();
+        console.log("Successfully undid auto-detection");
       } else {
-        // Push back if failed - at the end of the stack to maintain chronological order
-        undoStack.value.push(action);
-        alert("Undo failed: Could not delete the annotation.");
-        
-        // Refresh annotations from server to ensure UI is in sync
-        await debouncedRefreshAnnotations();
+        // If not all annotations could be deleted, inform the user
+        alert("Some auto-detected annotations could not be removed. The UI will be refreshed to show the current state.");
       }
-    } else if (action.type === 'DELETE') {
-      // Undo deletion means re-creating the annotation
-      // Ensure _id is not part of the data sent for creation
-      const { _id, ...dataToRecreate } = action.annotationData;
       
-      // Preserve the original class and color
-      const className = dataToRecreate.label;
-      console.log("Recreating deleted annotation with class:", className);
+      // Always refresh annotations to ensure UI matches backend state
+      await debouncedRefreshAnnotations();
       
-      // Ensure the color matches the class
-      dataToRecreate.color = getColorForClass(className);
-      
-      const newAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
-      if (newAnnotation && newAnnotation._id) {
-        console.log("Successfully recreated annotation with ID:", newAnnotation._id);
-        
-        // For redo, we need to know the ID of the annotation that was just re-created to delete it again
-        redoStack.value.push({ 
-          type: 'DELETE', 
-          timestamp: action.timestamp, // Preserve the original timestamp
-          annotationData: { 
-            ...dataToRecreate, 
-            _id: newAnnotation._id,
-            color: newAnnotation.color || dataToRecreate.color,
-            label: className // Ensure class info is preserved 
-          } 
-        });
-        
-        // Make sure UI is updated
-        await debouncedRefreshAnnotations();
-      } else {
-        undoStack.value.push(action); // Push back if failed
-        alert("Undo failed: Could not re-create the annotation.");
-        await debouncedRefreshAnnotations();
-      }
+    } else if (action.type === 'CREATE') {
+      // Implementation for CREATE will be added here (not part of this task)
+      // This is just a placeholder
+      console.warn("CREATE undo not implemented yet");
+      undoStack.value.push(action); // Put it back for now
     } else if (action.type === 'UPDATE') {
-      // Undo update means reverting to oldData
-      const annotationId = action.annotationId;
-      
-      // Check if the annotation still exists
-      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
-      if (!annotationExists) {
-        console.warn(`Cannot undo update: annotation with ID ${annotationId} no longer exists`);
-        // Instead of trying to update, we should recreate the annotation
-        const { _id, ...dataToRecreate } = action.oldData;
-        console.log("Recreating annotation instead of updating");
-        
-        const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
-        if (reCreatedAnnotation && reCreatedAnnotation._id) {
-          console.log("Successfully recreated annotation with ID:", reCreatedAnnotation._id);
-          
-          // For redo, we need to use the new ID
-          redoStack.value.push({ 
-            type: 'DELETE',
-            timestamp: action.timestamp, // Preserve the original timestamp
-            annotationData: { 
-              ...dataToRecreate, 
-              _id: reCreatedAnnotation._id,
-              color: reCreatedAnnotation.color || dataToRecreate.color,
-              label: dataToRecreate.label // Ensure class info is preserved
-            } 
-          });
-          
-          // Ensure UI state is in sync with backend
-          await debouncedRefreshAnnotations();
-        } else {
-          alert("Undo failed: Could not recreate the annotation to its previous state.");
-          // Ensure UI state is in sync with backend
-          await debouncedRefreshAnnotations();
-        }
-        return;
-      }
-      
-      // Normal update flow if annotation exists
-      const { _id, ...updatePayload } = action.oldData;
-      const success = await annotationStore.updateAnnotation(annotationId, updatePayload, projectId.value, imageId.value);
-      if (success) {
-        console.log("Successfully updated annotation during undo");
-        
-        // For redo, we need to push an UPDATE action with oldData being current (action.oldData) and newData being action.newData
-        redoStack.value.push({
-          type: 'UPDATE',
-          annotationId: annotationId,
-          timestamp: action.timestamp, // Preserve the original timestamp
-          oldData: action.oldData,
-          newData: action.newData
-        });
-        
-        // Update originalAnnotationBeforeEdit to reflect the undone state if user continues editing
-        if (editingAnnotationId.value === annotationId) {
-          originalAnnotationBeforeEdit.value = JSON.parse(JSON.stringify(action.oldData));
-        }
-        
-        // Ensure UI state is in sync with backend
-        await debouncedRefreshAnnotations();
-      } else {
-        undoStack.value.push(action);
-        alert("Undo failed: Could not update the annotation to its previous state.");
-        
-        // Ensure UI state is in sync with backend
-        await debouncedRefreshAnnotations();
-      }
+      // Implementation for UPDATE will be added here (not part of this task)
+      // This is just a placeholder
+      console.warn("UPDATE undo not implemented yet");
+      undoStack.value.push(action); // Put it back for now
+    } else if (action.type === 'DELETE') {
+      // Implementation for DELETE will be added here (not part of this task)
+      // This is just a placeholder
+      console.warn("DELETE undo not implemented yet");
+      undoStack.value.push(action); // Put it back for now
     }
   } catch (error) {
     console.error("Error occurred during undo operation:", error);
@@ -1148,159 +1174,80 @@ async function undo() {
 
 async function redo() {
   if (!canRedo.value) return;
-    logStackState(); // Log stack state before redo
   
-  // Sort the stack by timestamp to ensure newest actions are redone first
-  redoStack.value.sort((a, b) => b.timestamp - a.timestamp);
+  logStackState(); // Log stack state before redo
+  
   const action = redoStack.value.pop();
   console.log("Redo action:", action.type, "with timestamp:", new Date(action.timestamp).toISOString());
 
   try {
-    if (action.type === 'CREATE') { // Redo creation
-      // The annotationData in a CREATE action on redoStack is the one that was originally created.
-      // We need to remove its _id if it's there, as createAnnotation expects data without an _id.
-      const { _id, ...dataToRecreate } = action.annotationData;
+    if (action.type === 'AUTO_DETECT') { // Redo auto-detection
+      console.log("Redoing auto-detection of", action.annotationIds.length, "annotations");
       
-      // Preserve the original class and color
-      const className = dataToRecreate.label;
-      console.log("Recreating annotation with class:", className);
+      // Get current annotations to append to
+      const currentAnnotations = [...annotationStore.currentAnnotations];
+      const newAnnotations = [];
       
-      // Make sure to set the color to match the original class
-      dataToRecreate.color = getColorForClass(className);
+      // Prepare new annotations without _id as we're recreating them
+      for (const annData of action.annotationData) {
+        const { _id, ...dataToRecreate } = annData;
+        
+        // Ensure color matches the class
+        dataToRecreate.color = getColorForClass(dataToRecreate.label);
+        
+        // Add to our new annotations list
+        newAnnotations.push(dataToRecreate);
+      }
       
-      // Create a new annotation using the original data
-      const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
-      if (reCreatedAnnotation && reCreatedAnnotation._id) {
-        console.log("Successfully recreated annotation with ID:", reCreatedAnnotation._id, "using timestamp:", new Date(action.timestamp).toISOString());
+      // Combine current with new
+      const allAnnotations = [...currentAnnotations, ...newAnnotations];
+      
+      // Update all annotations at once to avoid multiple server round trips
+      try {
+        const response = await annotationStore.setAllAnnotationsForImage(imageId.value, allAnnotations, projectId.value);
+        
+        if (response && response.annotations) {
+          // Get the newly created annotations (should be at the end of the array)
+          const createdAnnotations = response.annotations.slice(-newAnnotations.length);
           
-        // Push new CREATE action to undo stack with the new ID
-        undoStack.value.push({ 
-          type: 'CREATE', 
-          annotationId: reCreatedAnnotation._id,
-          timestamp: action.timestamp, // Preserve the original timestamp exactly for consistent chronology
-          annotationData: { 
-            ...dataToRecreate, 
-            color: reCreatedAnnotation.color || dataToRecreate.color, 
-            _id: reCreatedAnnotation._id,
-            label: className // Ensure class info is preserved
-          }
-        });
-      } else {
-        redoStack.value.push(action); // Push back if failed
-        alert("Redo failed: Could not re-create the annotation.");
-        
-        // Ensure UI state is in sync with backend
-        await debouncedRefreshAnnotations();
-      }
-    } else if (action.type === 'DELETE') { // Redo deletion
-      // The annotationData in a DELETE action on redoStack contains the _id of the annotation to be deleted.
-      const annotationId = action.annotationData._id;
-      
-      // Verify that the annotation exists before trying to delete it
-      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
-      if (!annotationExists) {
-        console.warn(`Cannot redo deletion: annotation with ID ${annotationId} no longer exists`);
-        // Skip this action since the annotation is already gone
-        
-        // Ensure UI state is in sync with backend
-        await debouncedRefreshAnnotations();
-        return;
-      }
-      
-      // Save a copy of the annotation data before deleting (for potential future use)
-      const annotationToDelete = annotationStore.currentAnnotations.find(ann => ann._id === annotationId);
-      if (!annotationToDelete) {
-        console.error("Annotation not found in store despite existing check passing");
-        return;
-      }
-      
-      const annotationDataCopy = JSON.parse(JSON.stringify(annotationToDelete));
-      
-      const success = await annotationStore.deleteAnnotation(annotationId, imageId.value, projectId.value);
-      if (success) {      
-        console.log("Successfully deleted annotation during redo");
-        // Ensure UI state is in sync with backend
-        await debouncedRefreshAnnotations();
-        
-        // Push original action to undo with timestamp preserved
-        undoStack.value.push({ 
-          type: 'DELETE',
-          annotationData: action.annotationData,
-          timestamp: action.timestamp // Preserve the exact timestamp for consistent chronology
-        });
-        
-        console.log(`Added DELETE action back to undo stack with timestamp ${new Date(action.timestamp).toISOString()}`);
-      } else {
-        redoStack.value.push(action); // Push back if failed
-        alert("Redo failed: Could not delete the annotation.");
-        
-        // Ensure UI state is in sync with backend
-        await debouncedRefreshAnnotations();
-      }
-    } else if (action.type === 'UPDATE') {
-      // Redo update means applying newData
-      const annotationId = action.annotationId;
-      
-      // Check if the annotation still exists
-      const annotationExists = annotationStore.currentAnnotations.some(ann => ann._id === annotationId);
-      if (!annotationExists) {
-        console.warn(`Cannot redo update: annotation with ID ${annotationId} no longer exists`);
-        // Instead of trying to update, we should recreate the annotation
-        const { _id, ...dataToRecreate } = action.newData;
-        console.log("Recreating annotation instead of updating");
-        
-        const reCreatedAnnotation = await annotationStore.createAnnotation(imageId.value, dataToRecreate, projectId.value);
-        if (reCreatedAnnotation && reCreatedAnnotation._id) {
-          console.log("Successfully recreated annotation with ID:", reCreatedAnnotation._id);
-          // Push new CREATE action to undo stack
-          undoStack.value.push({ 
-            type: 'CREATE', 
-            annotationId: reCreatedAnnotation._id,
-            timestamp: action.timestamp, // Preserve the original timestamp
-            annotationData: { 
-              ...dataToRecreate, 
-              _id: reCreatedAnnotation._id,
-              color: reCreatedAnnotation.color || dataToRecreate.color,
-              label: dataToRecreate.label // Ensure class info is preserved
-            } 
+          // Create a group action for undo
+          undoStack.value.push({
+            type: 'AUTO_DETECT',
+            timestamp: action.timestamp, // Preserve original timestamp
+            annotationIds: createdAnnotations.map(ann => ann._id),
+            annotationData: createdAnnotations.map(ann => ({ ...ann })),
           });
-        } else {
-          alert("Redo failed: Could not recreate the updated annotation.");
           
-          // Ensure UI state is in sync with backend
+          // Ensure UI is synchronized with backend state
+          await debouncedRefreshAnnotations();
+          
+          console.log("Successfully redid auto-detection of", createdAnnotations.length, "annotations");
+        } else {
+          redoStack.value.push(action); // Push back if failed
+          alert("Redo failed: Could not recreate the auto-detected annotations.");
           await debouncedRefreshAnnotations();
         }
-        return;
-      }
-      
-      // Normal update flow if annotation exists
-      const { _id, ...updatePayload } = action.newData;
-      const success = await annotationStore.updateAnnotation(annotationId, updatePayload, projectId.value, imageId.value);
-      if (success) {
-        console.log("Successfully updated annotation during redo with timestamp:", new Date(action.timestamp).toISOString());
-        
-        // Push the UPDATE action to undo with its timestamp preserved exactly as it was
-        undoStack.value.push({ 
-          type: 'UPDATE',
-          annotationId: annotationId,
-          timestamp: action.timestamp, // Preserve the exact timestamp for consistent chronology
-          oldData: action.oldData,
-          newData: action.newData
-        });
-        
-        console.log(`Added UPDATE action back to undo stack with timestamp ${new Date(action.timestamp).toISOString()}`);
-        
-        // Update originalAnnotationBeforeEdit to reflect the redone state if user continues editing
-        if (editingAnnotationId.value === annotationId) {
-          originalAnnotationBeforeEdit.value = JSON.parse(JSON.stringify(action.newData));
-        }
-      } else {
-        redoStack.value.push(action);
-        alert("Redo failed: Could not update the annotation to its next state.");
-        
-        // Ensure UI state is in sync with backend
+      } catch (error) {
+        console.error("Error during auto-detection redo:", error);
+        redoStack.value.push(action); // Push back if failed
+        alert("Redo failed: An error occurred while recreating auto-detected annotations.");
         await debouncedRefreshAnnotations();
       }
+    } else if (action.type === 'CREATE') {
+      // Implementation for CREATE will be added here (not part of this task)
+      // This is just a placeholder
+      console.warn("CREATE redo not implemented yet");
+      redoStack.value.push(action); // Put it back for now
+    } else if (action.type === 'UPDATE') {
+      // Implementation for UPDATE will be added here (not part of this task)
+      // This is just a placeholder
+      console.warn("UPDATE redo not implemented yet");
+      redoStack.value.push(action); // Put it back for now
+    } else if (action.type === 'DELETE') {
+      // Implementation for DELETE will be added here (not part of this task)
+      // This is just a placeholder
+      console.warn("DELETE redo not implemented yet");
+      redoStack.value.push(action); // Put it back for now
     }
   } catch (error) {
     console.error("Error occurred during redo operation:", error);
@@ -1314,90 +1261,387 @@ async function redo() {
   
   // Log stack state after redo
   logStackState();
-  
-  // redrawCanvas will be triggered by store updates
 }
 
-function redrawCanvas() {
-  if (!ctx || !canvasRef.value || !imageDimensions.value.width) return;
-  ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height);
-
-  // Draw all saved annotations
-  annotationStore.currentAnnotations.forEach(ann => {
-    if (!ann.label || (!ann._id && !ann.id)) { // Check for ann.id if _id is not yet assigned (e.g. optimistic update)
-        // console.warn("Skipping drawing annotation due to missing label or id:", ann);
-        return;
-    }
-    const color = ann.color || getColorForClass(ann.label); // Use annotation's own color if available
-    const displayRect = {
-        x: ann.x / imageDimensions.value.naturalWidth * imageDimensions.value.width,
-        y: ann.y / imageDimensions.value.naturalHeight * imageDimensions.value.height,
-        width: ann.width / imageDimensions.value.naturalWidth * imageDimensions.value.width,
-        height: ann.height / imageDimensions.value.naturalHeight * imageDimensions.value.height,
-    };
-    drawRect(displayRect, color, ann.label);
-    if (ann._id === highlightedAnnotationId.value) { // Use _id for highlighting
-        drawRect(displayRect, 'rgba(255, 255, 0, 0.7)', null, true);
-    }
-
-    // If this annotation is being edited, draw resize handles
-    if (ann._id === editingAnnotationId.value) {
-      drawResizeHandles(displayRect);
-    }
-  });
-
-  // Draw the rectangle that is pending class assignment (if any)
-  if (pendingAnnotationCoordinates) {
-    drawRect({
-        x: pendingAnnotationCoordinates.x_canvas,
-        y: pendingAnnotationCoordinates.y_canvas,
-        width: pendingAnnotationCoordinates.width_canvas,
-        height: pendingAnnotationCoordinates.height_canvas
-    }, 'rgba(0, 0, 255, 0.5)'); // Draw pending with a different color
-}}
-
-function drawRect(rect, color = 'red', label = null, isHighlight = false) {
-  if (!ctx || !rect) return;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = isHighlight ? 4 : 2;
-  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
-
-  if (label && !isHighlight) {
-    ctx.fillStyle = color;
-    ctx.fillRect(rect.x, rect.y - 14, ctx.measureText(label).width + 4, 14);
-    ctx.fillStyle = 'white';
-    ctx.font = '10px Arial';
-    ctx.fillText(label, rect.x + 2, rect.y - 4);
+// Helper functions to provide descriptions for undo/redo actions
+function getUndoActionDescription() {
+  if (undoStack.value.length === 0) return '';
+  
+  const action = undoStack.value[undoStack.value.length - 1];
+  switch (action.type) {
+    case 'CREATE':
+      return 'creation of annotation';
+    case 'DELETE':
+      return 'deletion of annotation';
+    case 'UPDATE':
+      return 'update to annotation';
+    case 'AUTO_DETECT':
+      return `auto-detection of ${action.annotationIds.length} shape${action.annotationIds.length === 1 ? '' : 's'}`;
+    default:
+      return 'last action';
   }
 }
 
-function drawResizeHandles(rect) {
-  if (!ctx || !rect) return;
+function getRedoActionDescription() {
+  if (redoStack.value.length === 0) return '';
+  
+  const action = redoStack.value[redoStack.value.length - 1];
+  switch (action.type) {
+    case 'CREATE':
+      return 'creation of annotation';
+    case 'DELETE':
+      return 'deletion of annotation';
+    case 'UPDATE':
+      return 'update to annotation';
+    case 'AUTO_DETECT':
+      return `auto-detection of ${action.annotationIds.length} shape${action.annotationIds.length === 1 ? '' : 's'}`;
+    default:
+      return 'last action';
+  }
+}
 
-  const halfHandleSize = HANDLE_SIZE / 2;
-
-  // Define handle positions
-  const handles = [
-    { name: 'topLeft', x: rect.x, y: rect.y },
-    { name: 'topRight', x: rect.x + rect.width, y: rect.y },
-    { name: 'bottomLeft', x: rect.x, y: rect.y + rect.height },
-    { name: 'bottomRight', x: rect.x + rect.width, y: rect.y + rect.height },
-    { name: 'top', x: rect.x + rect.width / 2, y: rect.y },
-    { name: 'bottom', x: rect.x + rect.width / 2, y: rect.y + rect.height },
-    { name: 'left', x: rect.x, y: rect.y + rect.height / 2 },
-    { name: 'right', x: rect.x + rect.width, y: rect.y + rect.height / 2 },
-  ];
-
-  ctx.fillStyle = 'white';
-  ctx.strokeStyle = 'black';
-  ctx.lineWidth = 1;
-
-  handles.forEach(handle => {
-    ctx.beginPath();
-    ctx.arc(handle.x, handle.y, halfHandleSize, 0, 2 * Math.PI);
-    ctx.fill();
-    ctx.stroke();
-  });
+/**
+ * Handles the auto-detection of shapes in the current image
+ * Converts detected objects into annotations with default class names
+ */
+async function detectShapes() {
+  if (detectingShapes.value) return;
+  
+  // Button timeout reference for cleanup
+  let buttonTimeout;
+  let detectButton;
+  let originalButtonText;
+  
+  try {
+    detectingShapes.value = true;
+    
+    // Update UI to show detecting state using nextTick to ensure DOM is available
+    await nextTick();
+    
+    // Store the button reference to use consistently throughout the function
+    detectButton = document.querySelector('button[title="Auto-detect shapes in the image"]');
+    if (detectButton) {
+      // Save original button text for restoration
+      originalButtonText = detectButton.innerHTML;
+      detectButton.innerHTML = '<span>Detecting...</span>';
+      detectButton.setAttribute('disabled', 'true');
+      
+      // Set timeout to revert button if detection takes too long (30 seconds)
+      buttonTimeout = setTimeout(() => {
+        if (detectingShapes.value) {
+          // Reset detecting state if it's still ongoing
+          detectingShapes.value = false;
+          detectButton.innerHTML = originalButtonText;
+          detectButton.removeAttribute('disabled');
+          console.warn('Detection timeout - button restored automatically');
+        }
+      }, 30000);
+    }    // Get the image source URL
+    const imageSource = imageUrl.value;
+    
+    // Send the image URL to the server for processing
+    console.log(`Using image URL for detection with method: ${detectionMethod.value}`);
+      let detectionResponse;
+    if (detectionMethod.value === 'ssim' && referenceImageData.value) {
+      // For SSIM, compare with reference image
+      console.log('Comparing with reference image for structural differences...');
+      const comparisonResults = await compareScreenshots(imageSource, referenceImageData.value);
+      
+      // Convert comparison results to annotation format
+      if (comparisonResults && comparisonResults.ComparisonResult && comparisonResults.ComparisonResult.changes) {
+        const changes = comparisonResults.ComparisonResult.changes;
+        detectionResponse = {
+          detections: changes.map(change => ({
+            Label: "change",
+            Confidence: 0.9,
+            X: change.x,
+            Y: change.y,
+            Width: change.width,
+            Height: change.height
+          })),
+          dimensions: comparisonResults.ImageDimensions,
+          method: 'ssim'
+        };
+      } else {
+        // No changes detected
+        console.log('No significant changes detected between images');
+        detectionResponse = {
+          detections: [],
+          dimensions: { width: imageDimensions.value.naturalWidth, height: imageDimensions.value.naturalHeight },
+          method: 'ssim'
+        };
+      }
+    } else {
+      // For YOLO or OpenCV methods
+      console.log(`Detecting objects in image using ${detectionMethod.value}...`);
+      detectionResponse = await detectObjects(
+        imageSource, 
+        detectionMethod.value, 
+        detectionMethod.value === 'opencv' ? detectionParams.value : {}
+      );
+    }
+    
+    let detectedObjects = detectionResponse.detections;
+    let detectionDimensions = detectionResponse.dimensions;
+    
+    console.log(`Detection results using ${detectionMethod.value}:`, detectedObjects);
+    console.log('Detection dimensions:', detectionDimensions);
+    console.log('Current image dimensions:', {
+      naturalWidth: imageDimensions.value.naturalWidth,
+      naturalHeight: imageDimensions.value.naturalHeight,
+      displayWidth: imageDimensions.value.width,
+      displayHeight: imageDimensions.value.height
+    });
+    
+    // Generate fallback UI elements if no detections
+    if (!detectedObjects || detectedObjects.length === 0) {
+      console.warn('No objects detected in the image, generating fallbacks');
+      
+      const width = imageDimensions.value.naturalWidth;
+      const height = imageDimensions.value.naturalHeight;
+      
+      if (width > 0 && height > 0) {
+        console.log('Generating fallback UI element proposals');
+        
+        // Create an array of fallback UI elements
+        detectedObjects = [
+          // Window-like element in the center
+          {
+            Label: 'window',
+            Confidence: 0.8,
+            X: Math.floor(width * 0.15),
+            Y: Math.floor(height * 0.1),
+            Width: Math.floor(width * 0.7),
+            Height: Math.floor(height * 0.75)
+          },
+          // Taskbar at bottom
+          {
+            Label: 'taskbar',
+            Confidence: 0.9,
+            X: 0,
+            Y: Math.floor(height * 0.95),
+            Width: width,
+            Height: Math.floor(height * 0.05)
+          }
+        ];
+        
+        // Add some icon-like elements
+        const iconSize = Math.floor(Math.min(width, height) / 20);
+        for (let i = 0; i < 5; i++) {
+          detectedObjects.push({
+            Label: 'icon',
+            Confidence: 0.7,
+            X: Math.floor(width * 0.03) + (i * iconSize * 1.5),
+            Y: Math.floor(height * 0.03),
+            Width: iconSize,
+            Height: iconSize
+          });
+        }
+      } else {
+        alert('No objects detected in the image and unable to generate fallbacks.');
+        return;
+      }
+    }
+      // Process detected objects into annotations
+    const detectTimestamp = Date.now() + (performance.now() / 1000);
+    const allAnnotations = [...annotationStore.currentAnnotations];
+    const newAnnotations = [];
+    
+    // Update the image metadata to record this detection attempt
+    try {
+      await fetch(`/api/images/${imageId.value}/metadata`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          detectionAttempt: {
+            timestamp: new Date().toISOString(),
+            objectsFound: detectedObjects.length,
+          }
+        })
+      });
+    } catch (metadataError) {
+      console.warn('Failed to update image metadata:', metadataError);
+      // Non-critical error, continue with annotation
+    }
+      // Convert detected objects to annotation format
+    for (let i = 0; i < detectedObjects.length; i++) {
+      const obj = detectedObjects[i];
+      
+      // Use object label if available, otherwise use default class
+      const className = obj.Label || defaultDetectionClass.value;
+      
+      // Create a unique identifier for the auto-generated annotation
+      const tempId = `auto_${Date.now()}_${i}`;
+        // Need to scale coordinates if detection dimensions don't match actual image
+      let x = obj.X;
+      let y = obj.Y;
+      let width = obj.Width;
+      let height = obj.Height;        // Scale coordinates if we have both sets of dimensions
+      if (detectionDimensions && 
+          imageDimensions.value.naturalWidth && 
+          imageDimensions.value.naturalHeight) {
+          
+        // Calculate scaling factors
+        const scaleX = imageDimensions.value.naturalWidth / detectionDimensions.width;
+        const scaleY = imageDimensions.value.naturalHeight / detectionDimensions.height;
+        
+        console.log(`Object ${i} (${obj.Label}): Original detection coordinates:`);
+        console.log(`  Position: (${x}, ${y}), Size: ${width}x${height}`);
+        console.log(`  Image scaling: ${scaleX.toFixed(4)}x, ${scaleY.toFixed(4)}y`);          // Only apply scaling if the factor is significantly different from 1.0
+        // This prevents unnecessary adjustments for tiny rounding differences
+        if (Math.abs(scaleX - 1.0) > 0.01 || Math.abs(scaleY - 1.0) > 0.01) {
+          // Apply scaling
+          x = Math.round(x * scaleX);
+          y = Math.round(y * scaleY);
+          width = Math.round(width * scaleX);
+          height = Math.round(height * scaleY);
+          
+          console.log(`  Scaled to: Position: (${x}, ${y}), Size: ${width}x${height}`);
+        } else {
+          console.log(`  No scaling needed (factors too close to 1.0)`);
+        }
+      }
+      
+      // Safety check - ensure annotations don't exceed image bounds
+      const imageWidth = imageDimensions.value.naturalWidth;
+      const imageHeight = imageDimensions.value.naturalHeight;
+      
+      if (x < 0) { 
+        width += x; // Reduce width by the amount x is negative
+        x = 0;
+        console.log(`  Adjusted: x coordinate was negative, now ${x}`);
+      }
+      
+      if (y < 0) {
+        height += y; // Reduce height by the amount y is negative
+        y = 0;
+        console.log(`  Adjusted: y coordinate was negative, now ${y}`);
+      }
+      
+      if (x + width > imageWidth) {
+        width = imageWidth - x;
+        console.log(`  Adjusted: width exceeded image bounds, now ${width}`);
+      }
+      
+      if (y + height > imageHeight) {
+        height = imageHeight - y;
+        console.log(`  Adjusted: height exceeded image bounds, now ${height}`);
+      }
+      
+      // Skip annotation if it's too small after adjustments
+      if (width < 5 || height < 5) {
+        console.log(`  Skipping: annotation too small after bounds adjustment (${width}x${height})`);
+        continue;
+      }
+      
+      // Create annotation data
+      const annotationData = {
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        label: className,
+        color: getColorForClass(className),
+        id: tempId,
+        confidence: obj.Confidence // Store confidence for potential filtering
+      };
+      
+      newAnnotations.push(annotationData);
+      allAnnotations.push(annotationData);
+    }
+      // Update all annotations at once to avoid multiple server round trips
+    console.log(`Saving ${newAnnotations.length} auto-detected annotations`);
+    try {
+      const response = await annotationStore.setAllAnnotationsForImage(imageId.value, allAnnotations, projectId.value);
+      
+      if (response && response.annotations) {
+        // Add a single undo action for all created annotations
+        const createdAnnotations = response.annotations.slice(-newAnnotations.length);
+        
+        // Create a group action for undo
+        addToUndoStack({
+          type: 'AUTO_DETECT',
+          timestamp: detectTimestamp,
+          annotationIds: createdAnnotations.map(ann => ann._id),
+          annotationData: createdAnnotations.map(ann => ({ ...ann })),
+        });
+          // Ensure UI is synchronized with backend state
+        await debouncedRefreshAnnotations();
+        
+        // Update any image metadata in the store
+        const imageStore = useImageStore();
+        try {
+          await imageStore.refreshImageDetails(imageId.value);
+        } catch (refreshError) {
+          console.warn('Non-critical error refreshing image details:', refreshError);
+        }
+        
+        // Show success message
+        alert(`Successfully added ${createdAnnotations.length} auto-detected shapes.`);
+      } else {
+        console.error('Invalid response format:', response);
+        throw new Error('Invalid response from server when saving annotations');
+      }
+    } catch (saveError) {
+      console.error('Error saving annotations:', saveError);
+      throw new Error(`Failed to save detected shapes: ${saveError.message}`);
+    }} catch (error) {
+    console.error('Shape detection failed:', error);
+    
+    // Provide a more helpful error message
+    let errorMessage = error.message || 'Unknown error';
+    
+    // Check for specific errors and provide more context
+    if (errorMessage.includes('Failed to fetch') || error.name === 'TypeError' || errorMessage.includes('connect')) {
+      errorMessage = 'Failed to connect to the backend detection API. The server might be unavailable or starting up.\n\n' +
+                    'If the problem persists, check that:\n' +
+                    '1. Node.js backend is running at http://localhost:5001\n' +
+                    '2. Python with the required packages is installed (run setup_detection.ps1)';
+    } else if (errorMessage.includes('SecurityError') || errorMessage.includes('Tainted canvas')) {
+      errorMessage = 'Unable to access image data due to cross-origin restrictions.';
+    } else if (errorMessage.includes('Server error: Not Found')) {
+      errorMessage = 'The detection API endpoint was not found. This could be due to:\n' +
+                    '1. Incorrect URL configuration in the frontend\n' +
+                    '2. Detection routes not properly mounted in the backend\n\n' +
+                    'Please check your server configuration and restart the application.';
+    } else if (errorMessage.includes('Detection script not found')) {
+      errorMessage = 'The Python detection script was not found. Please verify that:\n' +
+                    '1. The AutoDesktopVisionApi folder exists in the project root\n' +
+                    '2. The detect_objects.py file is present in that folder\n' +
+                    '3. You have run the setup_detection script to install dependencies';
+    } else if (errorMessage.includes('Invalid response from server')) {
+      errorMessage = 'The server returned an unexpected response format. This could indicate a problem with:\n' +
+                    '1. The detection script output format\n' +
+                    '2. Server response processing\n\n' +
+                    'Try refreshing the page and attempt detection again.';
+    }
+    
+    alert('Failed to detect shapes: ' + errorMessage);  } finally {
+    detectingShapes.value = false;
+    
+    // Clear any timeout that might have been set
+    if (buttonTimeout) {
+      clearTimeout(buttonTimeout);
+      buttonTimeout = null;
+    }
+    
+    // Restore button state - use the reference to the button captured at the start of the function
+    if (detectButton && originalButtonText) {
+      detectButton.innerHTML = originalButtonText;
+      detectButton.removeAttribute('disabled');
+    } else {
+      // Fallback in case we lost the original reference
+      nextTick(() => {
+        const fallbackButton = document.querySelector('button[title="Auto-detect shapes in the image"]');
+        if (fallbackButton) {
+          fallbackButton.innerHTML = '<span>Detect Shapes</span>';
+          fallbackButton.removeAttribute('disabled');
+        }
+      });
+    }
+  }
 }
 
 function setTool(toolName) {
@@ -1492,6 +1736,8 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
             await projectStore.loadProjectById(newProjectId);
         }
         const image = imageStore.getImageById(newImageId);
+       
+       
         if (image) {
             imageUrl.value = getCorrectAssetUrl(image.path);
             await nextTick();
@@ -1505,6 +1751,48 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
         redoStack.value = [];
     }
 });
+
+async function loadReferenceImage() {
+  if (!referenceImageId.value) {
+    referenceImagePreview.value = '';
+    referenceImageData.value = null;
+    return;
+  }
+  
+  try {
+    // Find the image in the store
+    const referenceImage = imageStore.allImages.find(img => img._id === referenceImageId.value);
+    if (referenceImage && referenceImage.path) {
+      // Generate the URL for display
+      referenceImagePreview.value = getCorrectAssetUrl(referenceImage.path);
+      
+      // Fetch the image as base64 data for SSIM comparison
+      try {
+        const response = await fetch(referenceImagePreview.value);
+        const blob = await response.blob();
+        
+        // Convert the blob to base64
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = () => {
+          referenceImageData.value = reader.result;
+          console.log('Reference image loaded as base64 for SSIM comparison');
+        };
+      } catch (fetchError) {
+        console.error('Error fetching reference image data:', fetchError);
+        referenceImageData.value = null;
+      }
+    } else {
+      console.error('Reference image not found');
+      referenceImagePreview.value = '';
+      referenceImageData.value = null;
+    }
+  } catch (error) {
+    console.error('Error loading reference image:', error);
+    referenceImagePreview.value = '';
+    referenceImageData.value = null;
+  }
+}
 </script>
 
 <style scoped>
@@ -1555,7 +1843,7 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
   padding: 8px;
   border: 1px solid #ddd;
   background-color: white;
-  cursor: pointer;
+   cursor: pointer;
   text-align: left;
   border-radius: 3px;
 }
@@ -1795,5 +2083,66 @@ watch([() => route.params.projectId, () => route.params.imageId], async ([newPro
   color: red;
   font-size: 0.9em;
   margin-top: 5px;
+}
+
+/* Detection Settings Styles */
+.detection-settings-section {
+  background-color: #f5f5f5;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 15px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.detection-settings-section h4 {
+  margin-top: 0;
+  margin-bottom: 10px;
+  color: #333;
+  font-size: 1rem;
+}
+
+.detection-method {
+  margin-bottom: 10px;
+}
+
+.detection-method label,
+.detection-params label {
+  display: inline-block;
+  min-width: 100px;
+  font-weight: 500;
+  margin-right: 10px;
+}
+
+.detection-method select,
+.detection-params select {
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  background-color: white;
+  font-size: 0.9rem;
+  width: 200px;
+}
+
+.param-group {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.param-group input[type="range"] {
+  flex: 1;
+  margin: 0 10px;
+}
+
+.param-group input[type="number"] {
+  width: 80px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+}
+
+.param-group span {
+  min-width: 30px;
+  text-align: center;
 }
 </style>

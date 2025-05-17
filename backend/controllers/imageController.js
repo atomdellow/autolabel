@@ -13,17 +13,26 @@ const unlinkAsync = promisify(fs.unlink);
 // @route   POST /api/images/project/:projectId
 // @access  Private (requires authentication)
 const uploadImage = async (req, res) => {
+    console.log('[imageController] Upload image request received');
     const { projectId } = req.params;
     const tagsInput = req.body.tags;
 
+    // Log the request information
+    console.log('[imageController] Project ID:', projectId);
+    console.log('[imageController] Request files:', req.files ? `${req.files.length} files received` : 'No files');
+    console.log('[imageController] Request body:', req.body);
+
     if (!req.files || req.files.length === 0) { // Changed from req.file to req.files
+        console.log('[imageController] Error: No image files uploaded');
         return res.status(400).json({ message: 'No image files uploaded' });
     }
 
     let project;
     try {
+        console.log('[imageController] Finding project with ID:', projectId);
         project = await Project.findById(projectId);
         if (!project) {
+            console.log('[imageController] Error: Project not found');
             // If project not found, delete the uploaded files to prevent orphans
             for (const file of req.files) {
                 await unlinkAsync(file.path);
@@ -37,40 +46,49 @@ const uploadImage = async (req, res) => {
                 await unlinkAsync(file.path);
             }
             return res.status(403).json({ message: 'Not authorized to upload images to this project' });
-        }
-    } catch (error) {
-        console.error('Error finding project or checking ownership:', error);
+        }    } catch (error) {
+        console.error('[imageController] Error finding project or checking ownership:', error);
         // Attempt to delete uploaded files if any error occurs during project validation
         if (req.files && req.files.length > 0) {
+            console.log('[imageController] Cleaning up uploaded files due to error');
             for (const file of req.files) {
                 try {
                     await unlinkAsync(file.path);
+                    console.log(`[imageController] Deleted file: ${file.path}`);
                 } catch (fileError) {
-                    console.error('Failed to delete orphaned file during project validation error:', fileError);
+                    console.error('[imageController] Failed to delete orphaned file during project validation error:', fileError);
                 }
             }
         }
-        return res.status(500).json({ message: 'Server error during project validation' });
+        return res.status(500).json({ message: 'Server error during project validation', error: error.message });
     }
 
     const savedImages = [];
-    const errors = [];
-
+    const errors = [];    console.log(`[imageController] Processing ${req.files.length} files`);
     for (const file of req.files) { // Iterate over req.files
         try {
+            console.log(`[imageController] Processing file: ${file.originalname}`);
+            
             // Get image dimensions
             let dimensions;
             try {
-                const buffer = fs.readFileSync(file.path); // Read file into a buffer
-                dimensions = sizeOf.imageSize(buffer); // Pass the buffer to imageSize
+                console.log(`[imageController] Reading file for dimensions: ${file.path}`);
+                dimensions = sizeOf(file.path); // Use direct file path for better performance
+                console.log(`[imageController] Image dimensions: ${dimensions.width}x${dimensions.height}`);
             } catch (dimError) {
-                console.error('Error getting image dimensions for file:', file.originalname, dimError);
-                await unlinkAsync(file.path); // Delete file if dimensions can't be read
-                errors.push({ file: file.originalname, message: 'Could not read image dimensions. Invalid or corrupted image?' });
-                continue; // Skip to the next file
-            }
-
-            const newImage = new Image({
+                console.error(`[imageController] Error getting image dimensions for file: ${file.originalname}`, dimError);
+                // Try using buffer as fallback
+                try {
+                    const buffer = fs.readFileSync(file.path);
+                    dimensions = sizeOf.imageSize(buffer);
+                    console.log(`[imageController] Image dimensions (buffer method): ${dimensions.width}x${dimensions.height}`);
+                } catch(bufferError) {
+                    console.error(`[imageController] Buffer method also failed: ${bufferError.message}`);
+                    await unlinkAsync(file.path); // Delete file if dimensions can't be read
+                    errors.push({ file: file.originalname, message: 'Could not read image dimensions. Invalid or corrupted image?' });
+                    continue; // Skip to the next file
+                }
+            }            const newImage = new Image({
                 name: file.originalname,
                 path: `/uploads/${file.filename}`,
                 project: projectId,
@@ -79,6 +97,13 @@ const uploadImage = async (req, res) => {
                 height: dimensions.height,
                 status: 'Unannotated',
                 tags: [],
+                metadata: {
+                    fileSize: file.size,
+                    mimeType: file.mimetype,
+                    uploadDate: new Date(),
+                    detectionAttempts: 0,
+                    lastDetectionDate: null
+                }
             });
 
             if (tagsInput) {
@@ -112,18 +137,21 @@ const uploadImage = async (req, res) => {
                 errors.push({ file: file.originalname, message: 'Server error while processing this image.' });
             }
         }
-    }
-
-    try {
+    }    try {
         if (savedImages.length > 0) {
+            console.log(`[imageController] Saving project with ${savedImages.length} new images`);
             await project.save(); // Save project once after all successful image additions
+            console.log('[imageController] Project saved successfully');
+        } else {
+            console.log('[imageController] No images were saved, not updating project');
         }
     } catch (projectSaveError) {
-        console.error('Error saving project after adding images:', projectSaveError);
+        console.error('[imageController] Error saving project after adding images:', projectSaveError);
         // This is a more complex scenario; potentially try to remove added image refs if project save fails
         // For now, just report the error.
         return res.status(500).json({
             message: 'Server error while saving project updates. Some images might have been saved without being linked to the project.',
+            error: projectSaveError.message,
             savedImages,
             errors
         });

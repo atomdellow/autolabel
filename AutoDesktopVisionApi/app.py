@@ -1,10 +1,15 @@
 from flask import Flask, request, jsonify
 import base64
 import io
+import requests
+from urllib.parse import urlparse
+import os
 from PIL import Image # For image decoding and manipulation
 from ultralytics import YOLO # For YOLOv8 model inference
+from flask_cors import CORS # For handling cross-origin requests
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # --- Load your YOLOv8 model here ---
 # IMPORTANT: Replace 'best.pt' with the actual name of your .pt model file if different.
@@ -62,19 +67,47 @@ def perform_actual_detection(image_pil):
             {"label": "error_inference_failed", "confidence": 0.0, "box": [0,0,0,0], "error_message": str(e)}
         ]
 
+import requests
+from urllib.parse import urlparse
+import os
+
 @app.route('/detect', methods=['POST'])
 def detect_objects():
-    if 'screenshot' not in request.json:
-        return jsonify({"error": "No screenshot data provided"}), 400
-
-    image_data_b64 = request.json['screenshot']
-    
     try:
-        # Decode the base64 image
-        print(f"Received image data (first 30 chars): {image_data_b64[:30]}...")
-        image_bytes = base64.b64decode(image_data_b64)
-        image_pil = Image.open(io.BytesIO(image_bytes))
-        print(f"Successfully decoded image. Size: {image_pil.size}, Mode: {image_pil.mode}")
+        if 'image_url' in request.json:
+            # Handle image URL
+            image_url = request.json['image_url']
+            print(f"Received image URL: {image_url}")
+            
+            # Check if URL is relative (from our server)
+            if not image_url.startswith(('http://', 'https://')):
+                # This is a relative URL, make it absolute
+                base_url = request.host_url.rstrip('/')
+                if not image_url.startswith('/'):
+                    image_url = '/' + image_url
+                image_url = base_url + image_url
+                print(f"Converted to absolute URL: {image_url}")
+            
+            # Download the image
+            response = requests.get(image_url, stream=True)
+            response.raise_for_status() # Raise an error for bad responses
+            
+            # Read the image as bytes
+            image_bytes = response.content
+            image_pil = Image.open(io.BytesIO(image_bytes))
+            print(f"Successfully downloaded image from URL. Size: {image_pil.size}, Mode: {image_pil.mode}")
+            
+        elif 'screenshot' in request.json:
+            # Handle base64 image data
+            image_data_b64 = request.json['screenshot']
+            
+            # Decode the base64 image
+            print(f"Received image data (first 30 chars): {image_data_b64[:30]}...")
+            image_bytes = base64.b64decode(image_data_b64)
+            image_pil = Image.open(io.BytesIO(image_bytes))
+            print(f"Successfully decoded image. Size: {image_pil.size}, Mode: {image_pil.mode}")
+        else:
+            return jsonify({"error": "No image data (URL or base64) provided"}), 400
 
         # Perform detection using the placeholder function
         detected_objects_raw = perform_actual_detection(image_pil)
@@ -111,4 +144,9 @@ def detect_objects():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    print("\n========================================")
+    print("🚀 Starting AutoLabel Detection Server")
+    print("📡 Script API: This is a helper script used by the Node.js backend")
+    print("🔍 Use the main server's /api/detection/detect endpoint instead")
+    print("========================================\n")
+    app.run(host='0.0.0.0', port=5000, debug=True)
