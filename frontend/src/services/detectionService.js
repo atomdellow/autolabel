@@ -4,63 +4,74 @@ import apiClient from './api';
  * Detect objects in an image using various detection methods via the backend API
  * 
  * @param {string} imageSource - Either a URL to an image or base64-encoded image data
- * @param {string} method - Detection method ('yolo', 'opencv', or 'detectron')
- * @param {Object} detectionParams - Additional parameters for the detection method
+ * @param {Object} params - Detection parameters
+ * @param {string} params.method - Detection method ('yolo', 'opencv', or 'ssim')
+ * @param {number} [params.sensitivity] - Sensitivity for OpenCV detection (0.1-0.9)
+ * @param {number} [params.minArea] - Minimum area for OpenCV detection
+ * @param {string} [params.referenceImage] - Base64 reference image for SSIM comparison
  * @returns {Promise<Object>} - Object with detections array and dimensions
  */
-export const detectObjects = async (imageSource, method = 'yolo', detectionParams = {}) => {
-  // Helper function to generate fallback detections
-  function generateFallbackDetections(imageSource) {
-    console.log('Generating client-side fallback UI element detections');
-    
-    // For now, use hardcoded values for a typical desktop UI
-    const width = 1920;
-    const height = 1080;
-    
-    return [
-      // Main window
-      {
-        Label: "window",
-        Confidence: 0.85,
-        X: Math.floor(width * 0.1),
-        Y: Math.floor(height * 0.05),
-        Width: Math.floor(width * 0.8),
-        Height: Math.floor(height * 0.85)
-      },
-      // Taskbar
-      {
-        Label: "taskbar",
-        Confidence: 0.9,
-        X: 0,
-        Y: Math.floor(height * 0.95),
-        Width: width,
-        Height: Math.floor(height * 0.05)
-      },
-      // A few generic icons
-      {
-        Label: "icon",
-        Confidence: 0.7,
-        X: Math.floor(width * 0.02),
-        Y: Math.floor(height * 0.02),
-        Width: Math.floor(width * 0.03),
-        Height: Math.floor(height * 0.03)
-      },
-      {
-        Label: "icon",
-        Confidence: 0.7,
-        X: Math.floor(width * 0.06),
-        Y: Math.floor(height * 0.02),
-        Width: Math.floor(width * 0.03),
-        Height: Math.floor(height * 0.03)
-      }
-    ];
-  }
-
+export const detectObjects = async (imageSource, params = {}) => {
+  // Extract method or default to 'yolo'
+  const method = params.method || 'yolo';
+  console.log(`Using detection method: ${method}`);
+  
   try {
     let payload = {
       detectionMethod: method,
-      detectionParams: detectionParams
+      detectionParams: {
+        sensitivity: params.sensitivity,
+        minArea: params.minArea,
+        maxArea: params.maxArea
+      }
     };
+    
+    // Helper function to generate fallback detections
+    function generateFallbackDetections() {
+      console.log('Generating client-side fallback UI element detections');
+      
+      // For now, use hardcoded values for a typical desktop UI
+      const width = 1920;
+      const height = 1080;
+      
+      return [
+        // Main window
+        {
+          Label: "window",
+          Confidence: 0.85,
+          X: Math.floor(width * 0.1),
+          Y: Math.floor(height * 0.05),
+          Width: Math.floor(width * 0.8),
+          Height: Math.floor(height * 0.85)
+        },
+        // Taskbar
+        {
+          Label: "taskbar",
+          Confidence: 0.9,
+          X: 0,
+          Y: Math.floor(height * 0.95),
+          Width: width,
+          Height: Math.floor(height * 0.05)
+        },
+        // A few generic icons
+        {
+          Label: "icon",
+          Confidence: 0.7,
+          X: Math.floor(width * 0.02),
+          Y: Math.floor(height * 0.02),
+          Width: Math.floor(width * 0.03),
+          Height: Math.floor(height * 0.03)
+        },
+        {
+          Label: "icon",
+          Confidence: 0.7,
+          X: Math.floor(width * 0.06),
+          Y: Math.floor(height * 0.02),
+          Width: Math.floor(width * 0.03),
+          Height: Math.floor(height * 0.03)
+        }
+      ];
+    }
     
     // Determine if imageSource is a URL or base64 data
     if (imageSource.startsWith('http') || imageSource.startsWith('/')) {
@@ -211,9 +222,46 @@ export const compareScreenshots = async (image1, image2) => {
     } else {
       console.error('Comparison error:', response.data.error);
       throw new Error(response.data.error || 'Failed to compare screenshots');
-    }
-  } catch (error) {
+    }  } catch (error) {
     console.error('Screenshot comparison failed:', error);
     throw error;
   }
 };
+
+/**
+ * Check the status of the detection server
+ * @returns {Promise<Object>} - Server status information
+ */
+export const checkServerStatus = async () => {
+  try {
+    const response = await apiClient.get('/api/detection/server-status');
+    return response.data;
+  } catch (error) {
+    console.error('Error checking server status:', error);
+    return {
+      status: 'error',
+      message: error.response?.data?.message || error.message || 'Failed to check server status'
+    };
+  }
+};
+
+/**
+ * Start the detection server manually
+ * @returns {Promise<Object>} - Server start response
+ */
+export const startDetectionServer = async () => {
+  try {
+    const response = await apiClient.post('/api/detection/start-server');
+    return response.data;
+  } catch (error) {
+    console.error('Error starting detection server:', error);
+    return {
+      status: 'error',
+      message: error.response?.data?.message || error.message || 'Failed to start detection server'
+    };
+  }
+};
+
+// Export the detectObjects function with an alias for backward compatibility
+// This helps components that might be using the old function name
+export const detectObjectsInImage = detectObjects;

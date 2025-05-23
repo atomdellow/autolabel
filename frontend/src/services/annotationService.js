@@ -10,6 +10,26 @@ export const getAnnotationsForImage = async (imageId) => {
   }
 };
 
+// Import annotations from JSON for an image
+export const importAnnotationsFromJson = async (imageId, annotations, format = 'default', mergeStrategy = 'replace') => {
+  try {
+    const payload = { 
+      annotations,
+      format,
+      mergeStrategy 
+    };
+    const response = await apiClient.post(`/annotations/image/${imageId}/import`, payload);
+    return response.data;
+  } catch (error) {
+    console.error('Error in importAnnotationsFromJson service:', error.response ? error.response.data : error.message, error);
+    if (error.response) {
+      throw error.response.data;
+    } else {
+      throw new Error('Network error or server did not respond');
+    }
+  }
+};
+
 // Create an annotation for an image
 // WARNING: This function uses /annotations/image/:imageId/set which DELETES ALL existing annotations before creating new ones
 // Use setAllAnnotationsForImage instead for adding a new annotation while preserving existing ones

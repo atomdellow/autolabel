@@ -7,6 +7,8 @@ const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  // Add timeout to prevent long-hanging requests
+  timeout: 30000, // 30 seconds timeout
 });
 
 apiClient.interceptors.request.use(
@@ -18,6 +20,31 @@ apiClient.interceptors.request.use(
     return config;
   },
   (error) => {
+    console.error('API request interceptor error:', error);
+    return Promise.reject(error);
+  }
+);
+
+// Add response interceptor for common error handling
+apiClient.interceptors.response.use(
+  (response) => {
+    return response;
+  },
+  (error) => {
+    // Handle common connection errors
+    if (!error.response) {
+      if (error.code === 'ECONNABORTED') {
+        console.error('Request timeout - server took too long to respond');
+        error.friendlyMessage = 'The server took too long to respond. Please try again later.';
+      } else if (error.code === 'ERR_NETWORK' || error.message.includes('Network Error')) {
+        console.error('Network error - cannot connect to backend server');
+        error.friendlyMessage = 'Cannot connect to the server. Please check if the backend server is running.';
+      }
+    } else if (error.response.status === 500) {
+      console.error('Server error:', error.response.data);
+      error.friendlyMessage = 'The server encountered an internal error. Please try again later.';
+    }
+    
     return Promise.reject(error);
   }
 );

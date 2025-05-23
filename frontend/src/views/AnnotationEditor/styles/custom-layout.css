@@ -1,0 +1,106 @@
+/* 
+  Custom styles to ensure the image area is at least 80% of the screen width 
+  and ensure the tools panel is at the edge of the screen
+*/
+
+/* Reset body and html to ensure full viewport coverage */
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
+  box-sizing: border-box;
+}
+
+body {
+  position: relative;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+}
+
+/* Main editor container */
+.annotation-editor-view {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  position: relative;
+}
+
+/* Editor layout (3-column layout) */
+.editor-layout {
+  display: flex;
+  flex: 1;
+  height: calc(100vh - 100px); /* Account for navbar height only */
+  width: 100vw;
+  max-width: 100vw;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  justify-content: space-between; /* Distribute space between columns */
+}
+
+/* Fixed-width left toolbar - now using percentage */
+.toolbar {
+  width: 12.5%;
+  min-width: 120px;
+  max-width: 200px;
+  height: 100%;
+  overflow-y: auto;
+  background-color: #fff;
+  border-right: 1px solid #ddd;
+  padding: 8px 8px 8px 0;
+  box-sizing: border-box;
+  position: relative;
+  z-index: 10;
+  margin: 0;
+  left: 0;
+}
+
+/* Flexible center for canvas - takes exactly 75% of space */
+.canvas-container {
+  width: 75%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: #f0f0f0;
+  overflow: hidden;
+}
+
+/* Fixed-width right panel - now using percentage */
+.side-panel {
+  width: 12.5%;
+  min-width: 120px;
+  max-width: 200px;
+  height: 100%;
+  overflow-y: auto;
+  background-color: #fff;
+  border-left: 1px solid #ddd;
+  padding: 8px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 10;
+}
+
+/* Image and canvas proper alignment */
+.canvas-container img,
+.canvas-container canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}

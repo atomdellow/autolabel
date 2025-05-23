@@ -1,0 +1,76 @@
+.image-tags-section {
+  margin: 15px 0;
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.image-tags-section h4 {
+  margin-top: 0;
+  margin-bottom: 10px;
+  font-size: 1em;
+}
+
+.tags-display {
+  margin-bottom: 10px;
+}
+
+.tag-pill {
+  display: inline-block;
+  padding: 5px 10px;
+  font-size: 0.85em;
+  color: #fff;
+  background-color: #3498db;
+  border-radius: 12px;
+  margin-right: 5px;
+  margin-bottom: 5px;
+}
+
+.remove-tag-btn {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 1em;
+  font-weight: bold;
+  margin-left: 5px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.remove-tag-btn:hover {
+  opacity: 1;
+}
+
+.add-tag-input {
+  display: flex;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.add-tag-input input {
+  flex: 1;
+  padding: 8px;
+  font-size: 0.9em;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.add-tag-input button {
+  padding: 8px 12px;
+  font-size: 0.9em;
+  color: white;
+  background-color: #3498db;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.add-tag-input button:hover {
+  background-color: #2980b9;
+}
+
+.error {
+  color: #e74c3c;
+  font-size: 0.85em;
+  margin-top: 5px;
+}

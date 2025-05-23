@@ -1,0 +1,80 @@
+.detection-settings-section {
+  margin: 15px 0;
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.detection-settings-section h4 {
+  margin-top: 0;
+  margin-bottom: 10px;
+  font-size: 1em;
+}
+
+.detection-method {
+  margin-bottom: 15px;
+}
+
+.detection-method label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 0.9em;
+  color: #555;
+}
+
+.detection-method select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.9em;
+  background-color: white;
+}
+
+.detection-params {
+  margin-top: 15px;
+}
+
+.param-group {
+  margin-bottom: 10px;
+}
+
+.param-group label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 0.9em;
+  color: #555;
+}
+
+.param-group input[type="range"] {
+  width: 100%;
+  margin-bottom: 5px;
+}
+
+.param-group input[type="number"] {
+  width: 100%;
+  padding: 6px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.param-group span {
+  font-size: 0.85em;
+  color: #666;
+}
+
+.reference-image-preview {
+  margin-top: 10px;
+  padding: 5px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background-color: #f5f5f5;
+}
+
+.reference-image-preview img {
+  max-width: 100%;
+  max-height: 150px;
+  display: block;
+  margin: 0 auto;
+}

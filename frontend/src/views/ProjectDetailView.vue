@@ -1,6 +1,8 @@
-<template>
-  <div class="project-detail-view" v-if="projectStore.currentProject">
-    <router-link to="/dashboard">&larr; Back to Dashboard</router-link>
+<template>  <div class="project-detail-view" v-if="projectStore.currentProject">
+    <BreadcrumbNav>
+      <router-link to="/dashboard">Dashboard</router-link> &gt;
+      <span>{{ projectStore.currentProject.name }}</span>
+    </BreadcrumbNav>
     <h1>{{ projectStore.currentProject.name }}</h1>
     <p>{{ projectStore.currentProject.description }}</p>
     <p><small>Model Type: {{ projectStore.currentProject.modelType }}</small></p>
@@ -143,6 +145,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useProjectStore } from '../store/projectStore';
 import { useImageStore } from '../store/imageStore';
 import { useTrainingStore } from '../store/trainingStore';
+import BreadcrumbNav from '../components/BreadcrumbNav.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -324,8 +327,13 @@ const handleRefreshModels = async () => {
 <style scoped>
 .project-detail-view {
   max-width: 1000px;
-  margin: 20px auto;
+  margin: 0 auto;
   padding: 20px;
+  overflow-y: auto;
+  position: relative;
+  z-index: 1;
+  height: calc(100vh - 120px); /* Account for navbar (100px) and some margins */
+  min-height: 400px;
 }
 
 .card {
@@ -335,6 +343,7 @@ const handleRefreshModels = async () => {
   padding: 20px;
   margin-bottom: 25px;
   box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  overflow: visible;
 }
 
 .card h2 {
@@ -391,6 +400,10 @@ const handleRefreshModels = async () => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 15px;
+  max-height: 400px;
+  overflow-y: auto;
+  padding-right: 10px; /* Add space for scrollbar */
+  margin-bottom: 10px;
 }
 
 .image-item {
@@ -487,7 +500,8 @@ const handleRefreshModels = async () => {
   font-family: monospace;
   font-size: 0.9em;
   border-radius: 4px;
-  margin-top:10px;
+  margin-top: 10px;
+  width: calc(100% - 20px); /* Adjust for padding */
 }
 
 .model-list {

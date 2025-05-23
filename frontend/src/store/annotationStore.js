@@ -5,6 +5,7 @@ import {
   updateAnnotation as apiUpdateAnnotation,
   deleteAnnotation as apiDeleteAnnotation,
   setAllAnnotationsForImage,
+  importAnnotationsFromJson,
 } from '../services/annotationService';
 import { useImageStore } from './imageStore';
 
@@ -90,13 +91,12 @@ export const useAnnotationStore = defineStore('annotation', {
       } finally {
         this.loading = false;
       }
-    },
-    
-    async createAnnotation(imageId, annotationData, projectId) {
+    },    
+    async createAnnotation(annotationData, projectId, imageId) {
       this.loading = true;
-      this.error = null;      try {
-        console.log(`Store: Creating annotation for image: ${imageId}`);
-        // IMPORTANT: The backend endpoint /annotations/image/:imageId/set first DELETES ALL existing annotations
+      this.error = null;
+      try {
+        console.log(`Store: Creating annotation for image: ${imageId}`);        // IMPORTANT: The backend endpoint /annotations/image/:imageId/set first DELETES ALL existing annotations
         // for this image and then creates the new one(s). 
         // Instead of just sending the new annotation, we'll send all existing ones plus the new one
         // To ensure latest annotations are preserved correctly in the undo stack, place the new annotation at the end
@@ -299,6 +299,53 @@ export const useAnnotationStore = defineStore('annotation', {
             }
         }
         return false;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async importAnnotationsFromJson(imageId, annotations, format = 'default', mergeStrategy = 'replace', projectId) {
+      this.loading = true;
+      this.error = null;
+      
+      try {
+        console.log(`Store: Importing annotations for image: ${imageId} (${annotations.length} annotations), format: ${format}, strategy: ${mergeStrategy}`);
+        const backendResponse = await importAnnotationsFromJson(imageId, annotations, format, mergeStrategy);
+        
+        if (backendResponse && backendResponse.annotations) {
+          console.log(`Store: Received ${backendResponse.annotations.length} annotations from server after import`);
+          this.annotations = backendResponse.annotations;
+          
+          // Update image in imageStore if needed
+          const imageStore = useImageStore();
+          if (projectId) {
+            await imageStore.fetchImages(projectId);
+          } else if (backendResponse.image && backendResponse.image._id) {
+            const imageIndexInStore = imageStore.images.findIndex(img => img._id === backendResponse.image._id);
+            if (imageIndexInStore !== -1) {
+              imageStore.images[imageIndexInStore] = backendResponse.image;
+            }
+          }
+          
+          return backendResponse;
+        } else {
+          console.error("Backend response was not in the expected format or service call failed.", backendResponse);
+          this.error = "Failed to import annotations or server response was malformed.";
+          await this.fetchAnnotations(imageId);
+          return null;
+        }
+      } catch (error) {
+        this.error = error.response?.data?.message || error.message || 'Failed to import annotations';
+        console.error("Error in store importAnnotationsFromJson:", error);
+        
+        if (imageId) {
+          try {
+            await this.fetchAnnotations(imageId);
+          } catch (fetchError) {
+            console.error("Failed to re-fetch annotations after import error:", fetchError);
+          }
+        }
+        return null;
       } finally {
         this.loading = false;
       }

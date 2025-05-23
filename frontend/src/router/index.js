@@ -32,13 +32,18 @@ const routes = [
     component: () => import('../views/ProjectDetailView.vue'),
     meta: { requiresAuth: true },
     props: true,
-  },
-  {
+  },  {
     path: '/project/:projectId/image/:imageId/annotate',
     name: 'AnnotationEditor',
-    component: () => import('../views/AnnotationEditorView.vue'),
+    component: () => import(/* webpackChunkName: "annotation-editor" */ '../components/LazyAnnotationEditor.js'),
     meta: { requiresAuth: true },
     props: true,
+  },
+  {
+    path: '/training',
+    name: 'Training',
+    component: () => import(/* webpackChunkName: "training" */ '../views/TrainingView.vue'),
+    meta: { requiresAuth: true },
   },
 ];
 

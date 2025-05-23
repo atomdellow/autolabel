@@ -1,0 +1,6 @@
+path: C:/Users/adamd/Projects/autolabel/backend/temp_yolo_datasets/project_6824e6ca17676d715fbfc04f_exp_1747897022733 
+train: images/train 
+val: images/val 
+
+nc: 8
+names: ['Chrome_Card_Profile', 'Chrome_Icon_Chrome', 'Icon_Chrome', 'Icon_Copilot', 'Icon_Illustrator', 'Icon_Recycling', 'Icon_Windows', 'traay_icon_acronis']

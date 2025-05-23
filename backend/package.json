@@ -4,8 +4,9 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
+    "start": "cross-env JWT_SECRET=93d0e8c755b994ff1e53fe69f73b6fdb78fa834c91319453e5854f2b3d067e4a PORT=5001 MONGO_URI=mongodb://localhost:27017/autolabel node server.js",
+    "dev": "cross-env JWT_SECRET=93d0e8c755b994ff1e53fe69f73b6fdb78fa834c91319453e5854f2b3d067e4a PORT=5001 MONGO_URI=mongodb://localhost:27017/autolabel nodemon server.js",
+    "secure-dev": "node start-with-vars.js",
     "test": "jest"
   },
   "keywords": [],
@@ -23,7 +24,9 @@
     "multer": "^1.4.5-lts.2"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "jest": "^29.7.0",
+    "node-mocks-http": "^1.17.2",
     "supertest": "^7.1.1"
   }
 }

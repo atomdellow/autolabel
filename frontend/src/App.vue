@@ -1,12 +1,20 @@
 <script setup>
 import { computed } from 'vue';
 import { useAuthStore } from './store/authStore';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
+import NavigationBar from './components/NavigationBar.vue';
+
+import './styles/app.css';
 
 const authStore = useAuthStore();
 const router = useRouter();
+const route = useRoute();
 
 const isAuthenticated = computed(() => authStore.isAuthenticated);
+// Determine if we should show full width content (like for annotation editor)
+const isFullWidth = computed(() => {
+  return route.path.includes('/annotate');
+});
 
 const handleLogout = async () => {
   await authStore.logout();
@@ -16,9 +24,10 @@ const handleLogout = async () => {
 
 <template>
   <div id="app">
-    <nav>
+    <NavigationBar>
       <router-link to="/">Home</router-link> |
       <router-link to="/dashboard">Dashboard</router-link> |
+      <router-link v-if="isAuthenticated" to="/training">Training</router-link> |
       <span v-if="!isAuthenticated">
         <router-link to="/login">Login</router-link> |
         <router-link to="/register">Register</router-link>
@@ -26,37 +35,19 @@ const handleLogout = async () => {
       <span v-else>
         <button @click="handleLogout">Logout</button>
       </span>
-    </nav>
-    <router-view />
+    </NavigationBar>
+
+    <main class="content-container" :class="{ 'full-width-content': isFullWidth, 'centered-content': !isFullWidth }">
+      <router-view />
+    </main>
   </div>
 </template>
 
+
 <style>
-#app {
-  font-family: Avenir, Helvetica, Arial, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  text-align: center;
-  color: #2c3e50;
-  margin-top: 60px;
-}
+/* Styles moved to separate file: src/styles/app.css */
+</style>
 
-nav {
-  padding: 30px;
-}
-
-nav a {
-  font-weight: bold;
-  color: #2c3e50;
-}
-
-nav a.router-link-exact-active {
-  color: #42b983;
-}
-
-button {
-  margin-left: 10px;
-  padding: 5px 10px;
-  cursor: pointer;
-}
+<style>
+/* Styles moved to separate file: src/styles/app.css */
 </style>

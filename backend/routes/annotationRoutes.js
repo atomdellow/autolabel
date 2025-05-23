@@ -5,6 +5,7 @@ const {
     getAnnotationsForImage,
     updateAnnotation,
     deleteAnnotation,
+    importAnnotationsFromJson,
 } = require('../controllers/annotationController');
 const { protect } = require('../middleware/authMiddleware');
 
@@ -16,6 +17,9 @@ router.post('/image/:imageId/set', setAnnotationsForImage);
 
 // Route to get all annotations for a specific image
 router.get('/image/:imageId', getAnnotationsForImage);
+
+// Route to import annotations from JSON for a specific image
+router.post('/image/:imageId/import', importAnnotationsFromJson);
 
 // Route to update a single annotation by its ID
 router.put('/:annotationId', updateAnnotation);

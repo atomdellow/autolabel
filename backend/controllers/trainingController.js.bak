@@ -1,0 +1,784 @@
+const Project = require('../models/Project');
+const Image = require('../models/Image');
+const Annotation = require('../models/Annotation');
+const fs = require('fs-extra'); // For file system operations
+const path = require('path');
+const { spawn, exec: execCallback } = require('child_process');
+const util = require('util');
+const exec = util.promisify(execCallback); // Convert callback-based exec to Promise-based
+const imageSize = require('image-size');
+
+// Helper function to convert annotations to YOLO format
+async function convertAnnotationsToYoloFormat(projectId, imageId, imageDbPath, classToIndexMap) {
+    // Get the image record from the database to use its stored dimensions
+    const imageRecord = await Image.findById(imageId);
+    if (!imageRecord) {
+        console.warn(`Image record not found in database for ID: ${imageId}. Skipping annotation conversion.`);
+        return '';
+    }
+    
+    // Use dimensions from the database record, which should be more reliable than reading from file
+    const imageWidth = imageRecord.width || 0;
+    const imageHeight = imageRecord.height || 0;
+      if (!imageWidth || !imageHeight) {
+        console.warn(`Image dimensions not available in database for image ${imageId} (${imageDbPath}). Width: ${imageWidth}, Height: ${imageHeight}. Skipping annotation conversion.`);
+        return '';
+    }
+    
+    const annotations = await Annotation.find({ image: imageId, project: projectId });
+    console.log(`Found ${annotations.length} annotations for image ${imageId} in project ${projectId}`);
+    
+    let yoloStrings = [];
+    for (const ann of annotations) {
+        if (classToIndexMap[ann.label] === undefined) {
+            console.warn(`Label ${ann.label} not in classToIndexMap for image ${imageId}. Skipping this annotation.`);
+            continue;
+        }
+        const classIndex = classToIndexMap[ann.label];
+        
+        const x_center = (ann.x + ann.width / 2) / imageWidth;
+        const y_center = (ann.y + ann.height / 2) / imageHeight;
+        const width_norm = ann.width / imageWidth;
+        const height_norm = ann.height / imageHeight;
+
+        if (x_center < 0 || x_center > 1 || y_center < 0 || y_center > 1 ||
+            width_norm <= 0 || width_norm > 1 || height_norm <= 0 || height_norm > 1) { // width/height should be > 0
+            console.warn(`Invalid normalized coordinates for annotation ${ann._id} on image ${imageId}. Skipping.`);
+            // console.warn(`Values: x_c:${x_center}, y_c:${y_center}, w:${width_norm}, h:${height_norm}`);
+            // console.warn(`Originals: x:${ann.x}, y:${ann.y}, w:${ann.width}, h:${ann.height}, imgW:${imageWidth}, imgH:${imageHeight}`);
+            continue;
+        }
+
+        yoloStrings.push(`${classIndex} ${x_center.toFixed(6)} ${y_center.toFixed(6)} ${width_norm.toFixed(6)} ${height_norm.toFixed(6)}`);
+    }
+    return yoloStrings.join('\n');
+}
+
+exports.startTraining = async (req, res) => {
+    const { projectId } = req.params;
+    console.log(`startTraining called with projectId: ${projectId}`);
+    console.log('Request headers:', req.headers);
+    console.log('Request body:', req.body);
+    
+    // Enhanced error handling for missing request body
+    if (!req.body) {
+        console.error('Request body is undefined or null');
+        return res.status(400).json({ 
+            message: 'Missing request body. Training configuration is required.', 
+            error: 'invalid_request' 
+        });
+    }
+    
+    try {
+        // Handle both multipart/form-data and application/json requests
+        let trainingConfig = req.body;
+        
+        // Extract and validate the main configuration parameters with defaults
+        const baseModelName = trainingConfig.baseModelName || 'yolov8n.pt';
+        if (!baseModelName) {
+            console.error('baseModelName is missing in the request');
+            return res.status(400).json({
+                message: 'baseModelName parameter is required for training',
+                error: 'missing_parameter'
+            });
+        }
+        
+        const epochs = parseInt(trainingConfig.epochs || 50, 10);
+        const batchSize = parseInt(trainingConfig.batchSize || 8, 10);
+        const imgSize = trainingConfig.imgSize || '640';
+        const useGPU = trainingConfig.useGPU === 'true' || trainingConfig.useGPU === true;
+        const trainSplit = parseFloat(trainingConfig.trainSplit || 0.8);
+        
+        // Log validated parameters
+        console.log(`Training request validated for project ${projectId} with parameters:`, {
+            baseModelName, epochs, batchSize, imgSize, useGPU, trainSplit
+        });
+        
+        // Parse dimensions - handle both string format (e.g. "640x480") and direct width/height values
+        let parsedImgWidth, parsedImgHeight;
+        
+        if (trainingConfig.imgWidth && trainingConfig.imgHeight) {
+            // If both width and height are provided directly
+            parsedImgWidth = parseInt(trainingConfig.imgWidth, 10);
+            parsedImgHeight = parseInt(trainingConfig.imgHeight, 10);        } else if (typeof imgSize === 'string' && imgSize.includes('x')) {
+            // If imgSize is in format "WIDTHxHEIGHT" (e.g., "640x480")
+            const [width, height] = imgSize.split('x').map(dim => parseInt(dim, 10));
+            parsedImgWidth = width;
+            parsedImgHeight = height;
+        } else {            // Legacy format - imgSize is a single number for square dimensions
+            const size = parseInt(imgSize, 10);
+            parsedImgWidth = size;
+            parsedImgHeight = size;
+        }
+
+        let trainDataBasePath;        try {
+            if (!projectId) {
+                console.error('No project ID provided in the request');
+                return res.status(400).json({ message: 'Missing project ID in request' });
+            }
+
+            console.log(`Looking for project with ID: ${projectId}`);
+            const project = await Project.findById(projectId);
+            if (!project) {
+                console.error(`Project not found with ID: ${projectId}`);
+                return res.status(404).json({ message: 'Project not found' });
+            }
+            
+            console.log(`Found project: ${project.name} (ID: ${project._id})`);
+            
+            // Query images using the correct field name 'project' instead of 'projectId'
+            let allProjectImages = await Image.find({ project: projectId });
+          if (allProjectImages.length === 0) {
+            console.warn(`No images found for project ${projectId}`);
+            return res.status(400).json({ 
+                message: 'No images in this project to train on.', 
+                error: 'query_error',
+                details: `Project ID ${projectId} was found but has no associated images. Please add images to the project before training.`
+            });        }
+
+        console.log(`Found ${allProjectImages.length} images for project ${projectId}`);
+        const validImages = [];for (const image of allProjectImages) {
+            // image.path is stored like '/uploads/image-1747255046988-432178248.png' (with a leading slash)
+            // We need to handle paths with or without leading slashes
+            const pathWithoutLeadingSlash = image.path.startsWith('/') ? image.path.substring(1) : image.path;
+            const absoluteImagePath = path.resolve(__dirname, '..', pathWithoutLeadingSlash);
+            
+            if (await fs.pathExists(absoluteImagePath)) {
+                validImages.push({ 
+                    ...image.toObject(), 
+                    absolutePath: absoluteImagePath, 
+                    dbPath: image.path,
+                    _id: image._id // Ensure we have the _id property to use as 'image' ID
+                });
+            } else {
+                console.warn(`Image file not found: ${absoluteImagePath} (from DB path ${image.path}) for image ID ${image._id}. Skipping.`);
+            }
+        }
+
+        if (validImages.length === 0) {
+            return res.status(400).json({ message: 'No valid image files found on disk for this project.' });
+        }
+
+        if (validImages.length < 2 && trainSplit < 1 && trainSplit > 0) { 
+             console.warn("Less than 2 images available. Using all for training and validation sets to avoid empty sets.");
+        }
+
+        const timestamp = Date.now();
+        const yoloProjectNameForRun = `project_${projectId.toString()}`;
+        const yoloExperimentNameForRun = `exp_${timestamp}`;
+        
+        trainDataBasePath = path.join(__dirname, '..', 'temp_yolo_datasets', `${yoloProjectNameForRun}_${yoloExperimentNameForRun}`);
+        const trainImagesDir = path.join(trainDataBasePath, 'images', 'train');
+        const valImagesDir = path.join(trainDataBasePath, 'images', 'val');
+        const trainLabelsDir = path.join(trainDataBasePath, 'labels', 'train');
+        const valLabelsDir = path.join(trainDataBasePath, 'labels', 'val');
+
+        await fs.ensureDir(trainImagesDir);
+        await fs.ensureDir(valImagesDir);
+        await fs.ensureDir(trainLabelsDir);
+        await fs.ensureDir(valLabelsDir);        const classNames = project.classes || [];
+        if (classNames.length === 0) {
+            await fs.remove(trainDataBasePath);
+            return res.status(400).json({ message: 'Project has no classes defined.' });
+        }
+        
+        // Dynamically gather all unique labels from annotations if they exist
+        const annotations = await Annotation.find({ projectId });
+        const uniqueLabels = new Set();
+        annotations.forEach(ann => {
+            if (ann.label) {
+                uniqueLabels.add(ann.label);
+            }
+        });
+        
+        // Merge project.classes with any unique annotation labels found
+        const allClassNames = [...new Set([...classNames, ...uniqueLabels])];
+        console.log('Using class names for training:', allClassNames);
+        
+        // Create class to index mapping
+        const classToIndexMap = allClassNames.reduce((acc, name, index) => {
+            acc[name] = index;
+            return acc;
+        }, {});
+
+        validImages.sort(() => 0.5 - Math.random()); 
+        
+        let trainingImages = [];
+        let validationImages = [];
+
+        if (trainSplit >= 1.0) { // Use all images for training, and also for validation
+            trainingImages = [...validImages];
+            validationImages = [...validImages];
+            console.log('Using all images for both training and validation sets.');
+        } else if (trainSplit <= 0.0) { // Use all images for validation, none for training (edge case, likely problematic for YOLO)
+            trainingImages = [...validImages]; // YOLO might need at least one training image, so using all for train too
+            validationImages = [...validImages];
+            console.warn('trainSplit is 0 or less. Using all images for validation and training as a fallback.');
+        } else {
+            const splitIndex = Math.max(1, Math.floor(validImages.length * trainSplit)); // Ensure at least 1 for training if possible
+            trainingImages = validImages.slice(0, splitIndex);
+            validationImages = validImages.slice(splitIndex);
+            if (validationImages.length === 0 && trainingImages.length > 0) {
+                console.warn("Validation set was empty after split. Moving one image from training to validation.");
+                validationImages.push(trainingImages.pop()); 
+            }
+            if (trainingImages.length === 0 && validImages.length > 0) {
+                 console.warn("Training set was empty after split. Using all images for training and validation as fallback.");
+                 trainingImages = [...validImages];
+                 validationImages = [...validImages];
+            }
+        }
+         if (trainingImages.length === 0 && validImages.length > 0) { // If still no training images but there are valid images
+            console.warn("Training set is still empty. Using all valid images for training and validation.");
+            trainingImages = [...validImages];
+            validationImages = [...validImages];
+        } else if (trainingImages.length === 0) { // If no valid images to begin with, or some other issue
+            await fs.remove(trainDataBasePath);
+            return res.status(400).json({ message: 'Training set is critically empty. Add more images or adjust split.' });
+        }
+
+        const processImageSet = async (imageSet, imgDir, lblDir) => {
+            let count = 0;
+            for (const image of imageSet) {
+                const destImagePath = path.join(imgDir, path.basename(image.absolutePath));
+                await fs.copy(image.absolutePath, destImagePath);
+                count++;
+                // Pass the database path (image.dbPath) for annotation conversion, which is relative to backend root
+                const yoloAnnotationData = await convertAnnotationsToYoloFormat(projectId, image._id, image.dbPath, classToIndexMap);
+                const labelFileName = `${path.parse(image.name).name}.txt`;
+                if (yoloAnnotationData && yoloAnnotationData.length > 0) {
+                    await fs.writeFile(path.join(lblDir, labelFileName), yoloAnnotationData);
+                } else {
+                    await fs.writeFile(path.join(lblDir, labelFileName), '');
+                    // console.log(`Created empty label file for ${image.name} in ${lblDir}`);
+                }
+            }
+            return count;
+        };
+
+        const trainImgCount = await processImageSet(trainingImages, trainImagesDir, trainLabelsDir);
+        const valImgCount = await processImageSet(validationImages, valImagesDir, valLabelsDir);        console.log(`Prepared ${trainImgCount} training images and ${valImgCount} validation images.`);
+
+        const dataYamlContent = `
+path: ${trainDataBasePath.replace(/\\/g, '/')} 
+train: images/train 
+val: images/val 
+
+nc: ${allClassNames.length}
+names: [${allClassNames.map(name => `'${name.replace(/'/g, "''")}'`).join(', ')}]
+`;
+        const dataYamlPath = path.join(trainDataBasePath, 'data.yaml');
+        await fs.writeFile(dataYamlPath, dataYamlContent.trim());        const trainingScriptPath = path.resolve(__dirname, '..', '..', 'AutoDesktopVisionApi', 'train_yolo.py');
+        const baseModelDir = path.resolve(__dirname, '..', '..', 'AutoDesktopVisionApi'); 
+        const outputModelDir = path.resolve(__dirname, '..', 'trained_models', projectId.toString());
+        await fs.ensureDir(outputModelDir);
+        
+        // Check if the Python training script exists
+        if (!await fs.pathExists(trainingScriptPath)) {
+            console.error(`Training script not found at path: ${trainingScriptPath}`);
+            return res.status(500).json({ 
+                message: 'Training cannot proceed: Python training script not found.', 
+                error: 'missing_script'
+            });
+        }
+        
+        // Check if the base model exists
+        const baseModelPath = path.join(baseModelDir, baseModelName);
+        if (!await fs.pathExists(baseModelPath)) {
+            console.error(`Base model not found at path: ${baseModelPath}`);
+            // Don't block training - the script will handle this error and download the model if needed
+            console.warn(`Base model ${baseModelName} not found at ${baseModelDir}. The training script will try to download it.`);
+        }
+
+        const pythonExecutable = process.platform === "win32" ? "python" : "python3";
+
+        const trainingArgs = [
+            trainingScriptPath,
+            '--data_yaml_path', dataYamlPath,
+            '--base_model_name', baseModelName,
+            '--base_model_path', baseModelDir,
+            '--epochs', epochs.toString(),
+            '--batch_size', batchSize.toString(),
+            '--img_width', parsedImgWidth.toString(),
+            '--img_height', parsedImgHeight.toString(),
+            '--yolo_project_name', yoloProjectNameForRun,
+            '--yolo_experiment_name', yoloExperimentNameForRun,
+            '--output_model_dir', outputModelDir,
+        ];
+          console.log(`Spawning training script: ${pythonExecutable} ${trainingArgs.join(' ')}`);
+        
+        // Send response immediately that process has started
+        res.status(202).json({ 
+            message: 'Training process initiated.', 
+            trainingDataPath: trainDataBasePath, 
+            outputModelDir: outputModelDir,
+            yoloProjectName: yoloProjectNameForRun,
+            yoloExperimentName: yoloExperimentNameForRun,
+            config: { 
+                baseModelName,
+                epochs, 
+                batchSize, 
+                imgSize, // Original imgSize string/value
+                imgWidth: parsedImgWidth, 
+                imgHeight: parsedImgHeight, 
+                trainSplit 
+            }
+        });        const trainingProcess = spawn(pythonExecutable, trainingArgs, { stdio: 'pipe' });
+        
+        // Collect all stdout and stderr for logging and potential debugging
+        let stdoutBuffer = '';
+        let stderrBuffer = '';
+
+        trainingProcess.stdout.on('data', (data) => {
+            const output = data.toString().trim();
+            stdoutBuffer += output + '\n';
+            console.log(`Training STDOUT (Project ${projectId}): ${output}`);
+            // TODO: Implement WebSocket to send this to frontend
+        });
+
+        trainingProcess.stderr.on('data', (data) => {
+            const errorOutput = data.toString().trim();
+            stderrBuffer += errorOutput + '\n';
+            console.error(`Training STDERR (Project ${projectId}): ${errorOutput}`);
+            // TODO: Implement WebSocket to send this to frontend
+        });        trainingProcess.on('close', async (code) => {
+            console.log(`Training process for project ${projectId} exited with code ${code}`);
+            
+            let trainingStatus = 'completed';
+            let trainingMessage = 'Training completed successfully.';
+            let modelFilePath = null;
+            
+            if (code !== 0) {
+                trainingStatus = 'failed';
+                trainingMessage = `Training process exited with code ${code}. Check logs for details.`;
+                
+                // Check for common error patterns in stderr
+                if (stderrBuffer.includes('CUDA out of memory')) {
+                    trainingMessage = 'Training failed: GPU out of memory. Try reducing batch size or image size, or use CPU mode.';
+                } else if (stderrBuffer.includes('CUDA') && stderrBuffer.includes('Error')) {
+                    trainingMessage = 'Training failed: CUDA GPU error. Consider using CPU mode instead.';
+                } else if (stderrBuffer.includes('No such file or directory')) {
+                    trainingMessage = 'Training failed: Missing file or directory. This may be due to incorrect paths or missing data.';
+                }
+            }
+            
+            // Check for the model file regardless of exit code
+            try {
+                // Look for any .pt files in the output directory
+                const files = await fs.readdir(outputModelDir);
+                const ptFiles = files.filter(file => file.endsWith('.pt'));
+                
+                if (ptFiles.length > 0) {
+                    console.log(`Training successful for project ${projectId}. Found model files: ${ptFiles.join(', ')}`);
+                    console.log(`Models saved in ${outputModelDir}`);
+                    
+                    // Get the latest model file (should be best.pt or last.pt)
+                    const bestModelIndex = ptFiles.findIndex(file => file === 'best.pt');
+                    const modelFile = bestModelIndex >= 0 ? ptFiles[bestModelIndex] : ptFiles[0];
+                    modelFilePath = path.join(outputModelDir, modelFile);
+                    
+                    // Update training status in database or cache
+                    // You can store this in a global variable, Redis, or a database table
+                    global.trainingStatus = {
+                        projectId,
+                        status: trainingStatus,
+                        message: trainingMessage,
+                        modelFile: modelFilePath,
+                        completedAt: new Date().toISOString()
+                    };
+                    
+                } else {
+                    console.error(`No model files found in ${outputModelDir} after training process completed`);
+                    trainingStatus = 'failed';
+                    trainingMessage = 'Training failed: No model files were generated.';
+                    
+                    // Try to look in the YOLO project directory as backup
+                    const yoloOutputDir = path.join(process.cwd(), yoloProjectNameForRun, yoloExperimentNameForRun, 'weights');
+                    if (await fs.pathExists(yoloOutputDir)) {
+                        const yoloFiles = await fs.readdir(yoloOutputDir);
+                        const yoloPtFiles = yoloFiles.filter(file => file.endsWith('.pt'));
+                        if (yoloPtFiles.length > 0) {
+                            console.log(`Found model files in YOLO output directory: ${yoloPtFiles.join(', ')}`);
+                            // Copy the files to our output directory
+                            for (const ptFile of yoloPtFiles) {
+                                const sourcePath = path.join(yoloOutputDir, ptFile);
+                                const destPath = path.join(outputModelDir, `${projectId}_${ptFile}`);
+                                await fs.copy(sourcePath, destPath);
+                                console.log(`Copied model from ${sourcePath} to ${destPath}`);
+                                
+                                // Update with found model
+                                if (ptFile === 'best.pt' || !modelFilePath) {
+                                    modelFilePath = destPath;
+                                    trainingStatus = 'completed';
+                                    trainingMessage = 'Training completed successfully (model found in alternate location).';
+                                }
+                            }
+                            
+                            // Update training status with found models
+                            global.trainingStatus = {
+                                projectId,
+                                status: trainingStatus,
+                                message: trainingMessage,
+                                modelFile: modelFilePath,
+                                completedAt: new Date().toISOString()
+                            };
+                        } else {
+                            console.error(`No model files found in YOLO output directory ${yoloOutputDir}`);
+                            
+                            // Update training status as failed
+                            global.trainingStatus = {
+                                projectId,
+                                status: 'failed',
+                                message: 'Training failed: No model files were generated in any location.',
+                                error: stderrBuffer,
+                                completedAt: new Date().toISOString()
+                            };
+                        }
+                    }
+                }
+            } catch (checkErr) {
+                console.error(`Error checking for model files: ${checkErr}`);
+                
+                // Update training status as error
+                global.trainingStatus = {
+                    projectId,
+                    status: 'failed',
+                    message: `Training error: ${checkErr.message}`,
+                    error: stderrBuffer,
+                    completedAt: new Date().toISOString()
+                };
+            }
+            
+            // Cleanup temporary training data
+            if (trainDataBasePath) {
+                try {
+                    await fs.remove(trainDataBasePath);
+                    console.log(`Successfully removed temp training data at ${trainDataBasePath}`);
+                } catch (err) {
+                    console.error(`Error removing temp training data at ${trainDataBasePath}: ${err}`);
+                }
+            }
+        });
+          trainingProcess.on('error', async (err) => {
+            console.error(`Failed to start training subprocess for project ${projectId}: ${err}`);
+             if (trainDataBasePath) {
+                try {
+                    await fs.remove(trainDataBasePath);
+                } catch (removeErr) {
+                    console.error(`Error removing temp training data during subprocess error: ${removeErr}`);
+                }
+            }
+            // Response already sent, so just log and handle internally.
+        });
+
+    } catch (error) {
+        console.error(`Error starting training for project ${projectId}:`, error);
+        if (trainDataBasePath) {
+            try {
+                await fs.remove(trainDataBasePath);
+            } catch (cleanupErr) {
+                console.error(`Error cleaning up ${trainDataBasePath} after main error: ${cleanupErr}`);
+            }
+        }
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Failed to start training process.', error: error.message });
+        }
+    }
+};
+
+exports.getTrainedModels = async (req, res) => {
+    const { projectId } = req.params;
+    try {
+        // If no projectId is provided, return models from all projects
+        if (!projectId) {
+            const rootModelDir = path.resolve(__dirname, '..', 'trained_models');
+            if (!await fs.pathExists(rootModelDir)) {
+                return res.json([]);
+            }
+            
+            // Get all project directories
+            const projectDirs = await fs.readdir(rootModelDir);
+            let allModels = [];
+            
+            // Iterate through each project directory
+            for (const projectDir of projectDirs) {
+                const projectModelDir = path.join(rootModelDir, projectDir);
+                const projectStat = await fs.stat(projectModelDir);
+                
+                // Skip if not a directory
+                if (!projectStat.isDirectory()) {
+                    continue;
+                }
+                
+                try {
+                    const files = await fs.readdir(projectModelDir);
+                    
+                    // Process PT files
+                    for (const file of files) {
+                        if (file.endsWith('.pt')) {
+                            const filePath = path.join(projectModelDir, file);
+                            try {
+                                const stats = await fs.stat(filePath);
+                                allModels.push({
+                                    name: file,
+                                    size: stats.size,
+                                    createdAt: stats.birthtime,
+                                    projectId: projectDir
+                                });
+                            } catch (statError) {
+                                console.error(`Error getting stats for model file ${filePath}:`, statError);
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error(`Error reading project directory ${projectModelDir}:`, error);
+                }
+            }
+            
+            return res.json(allModels);
+        }
+        
+        // If projectId is provided, return models just for that project
+        const projectModelDir = path.resolve(__dirname, '..', 'trained_models', projectId.toString());
+        if (!await fs.pathExists(projectModelDir)) {
+            return res.json([]);
+        }
+        
+        const files = await fs.readdir(projectModelDir);
+        const ptFiles = [];
+        
+        for (const file of files) {
+            if (file.endsWith('.pt')) {
+                const filePath = path.join(projectModelDir, file);
+                try {
+                    const stats = await fs.stat(filePath);
+                    ptFiles.push({
+                        name: file,
+                        size: stats.size,
+                        createdAt: stats.birthtime,
+                        projectId: projectId
+                    });
+                } catch (statError) {
+                    console.error(`Error getting stats for model file ${filePath}:`, statError);
+                    // Optionally add file with error or skip
+                    ptFiles.push({ name: file, error: 'Could not retrieve stats', projectId: projectId }); 
+                }
+            }
+        }
+        ptFiles.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt)); // Sort by newest first
+        res.json(ptFiles);
+    } catch (error) {
+        console.error(`Error fetching trained models for project ${projectId}:`, error);
+        res.status(500).json({ message: 'Failed to fetch trained models.', error: error.message });
+    }
+};
+
+exports.getTrainingStatus = async (req, res) => {
+    const { projectId } = req.params;
+    
+    try {
+        // If we have global training status info, return it
+        if (global.trainingStatus && global.trainingStatus.projectId === projectId) {
+            // Return cached training status
+            return res.json({
+                projectId: projectId,
+                status: global.trainingStatus.status || 'unknown',
+                progress: global.trainingStatus.progress || 0,
+                message: global.trainingStatus.message || 'Training status information available',
+                completedAt: global.trainingStatus.completedAt,
+                error: global.trainingStatus.error
+            });
+        }
+        
+        // Check if we have any recent model files for this project
+        const projectModelDir = path.resolve(__dirname, '..', 'trained_models', projectId.toString());
+        if (await fs.pathExists(projectModelDir)) {
+            try {
+                const files = await fs.readdir(projectModelDir);
+                const ptFiles = files.filter(file => file.endsWith('.pt'));
+                
+                if (ptFiles.length > 0) {
+                    // Get stats for the most recent model file
+                    const fileStats = [];
+                    for (const file of ptFiles) {
+                        try {
+                            const filePath = path.join(projectModelDir, file);
+                            const stats = await fs.stat(filePath);
+                            fileStats.push({
+                                name: file,
+                                createdAt: stats.birthtime
+                            });
+                        } catch (err) {
+                            console.warn(`Could not get stats for file ${file}: ${err.message}`);
+                        }
+                    }
+                    
+                    // Sort by creation time, newest first
+                    fileStats.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                    
+                    if (fileStats.length > 0) {
+                        const latestModel = fileStats[0];
+                        const creationTime = new Date(latestModel.createdAt);
+                        const now = new Date();
+                        const minutesAgo = Math.round((now - creationTime) / (1000 * 60));
+                        
+                        // If model was created in the last 10 minutes, we might have just completed training
+                        if (minutesAgo < 10) {
+                            return res.json({
+                                projectId: projectId,
+                                status: 'completed',
+                                progress: 100,
+                                message: `Training appears to have completed ${minutesAgo} minute(s) ago.`,
+                                completedAt: creationTime.toISOString(),
+                                modelFile: latestModel.name
+                            });
+                        } else {
+                            // Just return idle - we have models but no recent training activity
+                            return res.json({
+                                projectId: projectId,
+                                status: 'idle',
+                                progress: 0,
+                                message: `No active training. Latest model was created ${formatTimeAgo(minutesAgo)}.`
+                            });
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(`Error checking model directory: ${err.message}`);
+            }
+        }
+        
+        // Default response when no status info is available
+        return res.json({
+            projectId: projectId, 
+            status: "idle", 
+            progress: 0,
+            message: "No active training detected for this project."
+        });
+    } catch (error) {
+        console.error(`Error getting training status for project ${projectId}:`, error);
+        res.status(500).json({ 
+            projectId: projectId,
+            status: "error",
+            message: `Error retrieving training status: ${error.message}`
+        });
+    }
+};
+
+// Helper function to format time ago in a human-readable format
+function formatTimeAgo(minutes) {
+    if (minutes < 60) {
+        return `${minutes} minute(s) ago`;
+    } else if (minutes < 1440) { // less than 1 day
+        const hours = Math.floor(minutes / 60);
+        return `${hours} hour(s) ago`;
+    } else {
+        const days = Math.floor(minutes / 1440);
+        return `${days} day(s) ago`;
+    }
+}
+
+// Verify that all prerequisites for training are met
+exports.verifyTrainingPrerequisites = async (req, res) => {
+    const { projectId } = req.params;
+    const issues = [];
+    const warnings = [];
+    
+    try {
+        // 1. Check if project exists
+        const project = await Project.findById(projectId);
+        if (!project) {
+            return res.status(404).json({ 
+                success: false, 
+                message: 'Project not found',
+                canProceed: false
+            });
+        }
+        
+        // 2. Check if the project has any classes defined
+        if (!project.classes || project.classes.length === 0) {
+            warnings.push('Project has no predefined classes. Classes will be extracted from annotations.');
+        }
+        
+        // 3. Check if project has any annotations
+        const annotationCount = await Annotation.countDocuments({ projectId });
+        if (annotationCount === 0) {
+            issues.push('Project has no annotations. Please create annotations before training.');
+        } else {
+            console.log(`Project has ${annotationCount} annotations.`);
+        }
+        
+        // 4. Check if project has enough images
+        const imageCount = await Image.countDocuments({ projectId });
+        if (imageCount < 5) {
+            issues.push(`Project has only ${imageCount} images. At least 5 images are recommended for training.`);
+        } else {
+            console.log(`Project has ${imageCount} images.`);
+        }
+        
+        // 5. Check if base models exist
+        const yoloBaseModels = ['yolov8n.pt', 'yolov8s.pt', 'yolov8m.pt', 'yolov8l.pt', 'yolov8x.pt'];
+        const baseModelDir = path.resolve(__dirname, '..', '..', 'AutoDesktopVisionApi');
+        
+        const availableModels = [];
+        for (const model of yoloBaseModels) {
+            const modelPath = path.join(baseModelDir, model);
+            if (fs.existsSync(modelPath)) {
+                availableModels.push(model);
+            }
+        }
+        
+        if (availableModels.length === 0) {
+            issues.push('No base models found. Please contact your administrator.');
+        }
+        
+        // 6. Check if Python environment is available
+        try {
+            const pythonExecutable = process.platform === "win32" ? "python" : "python3";
+            const { stdout, stderr } = await exec(`${pythonExecutable} -c "import torch; print(torch.__version__); print('CUDA available:', torch.cuda.is_available())"}`);
+            console.log(`Python/Torch check: ${stdout}`);
+            
+            if (stdout.includes('CUDA available: False')) {
+                warnings.push('CUDA is not available. Training will use CPU, which is slower.');
+            }
+        } catch (pythonError) {
+            warnings.push(`Error checking Python environment: ${pythonError.message}`);
+        }
+        
+        // 7. Check if output directory is writable
+        const outputModelDir = path.resolve(__dirname, '..', 'trained_models', projectId.toString());
+        try {
+            await fs.ensureDir(outputModelDir);
+            const testFile = path.join(outputModelDir, '.write_test');
+            await fs.writeFile(testFile, 'test');
+            await fs.remove(testFile);
+        } catch (fsError) {
+            issues.push(`Cannot write to model output directory: ${fsError.message}`);
+        }
+        
+        // Determine if training can proceed
+        const canProceed = issues.length === 0;
+        
+        return res.status(200).json({
+            success: true,
+            projectId,
+            canProceed,
+            issues,
+            warnings,
+            stats: {
+                imageCount,
+                annotationCount,
+                classCount: project.classes ? project.classes.length : 0,
+                availableModels
+            }
+        });
+    } catch (error) {
+        console.error('Error in verifyTrainingPrerequisites:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Server error checking training prerequisites',
+            error: error.message,
+            canProceed: false
+        });
+    }
+};

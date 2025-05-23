@@ -1,0 +1,1562 @@
+<template>
+  <div class="annotation-editor-view">
+    <div class="breadcrumb">
+      <router-link :to="{ name: 'Dashboard' }">Dashboard</router-link> >
+      <router-link :to="{ name: 'ProjectDetail', params: { projectId: projectId } }">Project: {{ projectStore.currentProject?.name }}</router-link> >
+      <span>Annotate: {{ imageStore.getImageById(imageId)?.name }}</span>
+    </div>
+
+    <div class="editor-layout">      <div class="toolbar">
+        <h3>Tools</h3>        <button @click="setTool('rectangle')" :class="{ active: currentTool === 'rectangle' }">Rectangle</button>
+        <button @click="setTool('pan')" :class="{ active: currentTool === 'pan' }">Pan</button>
+        <button @click="setTool('select')" :class="{ active: currentTool === 'select' }">Select</button>
+          <div class="zoom-controls">          <button @click="zoomOut()" title="Zoom Out">
+            <span>-</span>
+          </button>
+          <span class="zoom-level">{{ Math.round((zoomLevel || 1) * 100) }}%</span>
+          <button @click="zoomIn()" title="Zoom In">
+            <span>+</span>
+          </button>          <button @click="resetZoom()" title="Reset Zoom">
+            <span>Reset</span>
+          </button>
+          <!-- Add debug test button for zoom functionality -->
+          <button @click="runAnnotationZoomTest()" v-if="annotationStore.currentAnnotations.length > 0" title="Test Zoom Functionality">
+            <span>Test Zoom</span>
+          </button>
+        </div>
+        
+        <button @click="detectShapes" :disabled="detectingShapes" title="Auto-detect shapes in the image">
+          <span v-if="detectingShapes">Detecting...</span>
+          <span v-else>Detect Shapes</span>
+        </button>
+        <button @click="undo" :disabled="!canUndo" :title="canUndo ? `Undo ${getUndoActionDescription()}` : 'Nothing to undo'">
+          Undo<span v-if="canUndo"> ({{ undoStack.length }})</span>
+        </button>
+        <button @click="redo" :disabled="!canRedo" :title="canRedo ? `Redo ${getRedoActionDescription()}` : 'Nothing to redo'">
+          Redo<span v-if="canRedo"> ({{ redoStack.length }})</span>
+        </button>
+      </div>
+
+      <div class="canvas-container" ref="canvasContainerRef">
+        <img ref="imageRef" :src="imageUrl" @load="onImageLoad" :style="imageStyle" alt="Image to annotate" />
+        <canvas ref="canvasRef" @mousedown="handleMouseDown" @mousemove="handleMouseMove" @mouseup="handleMouseUp" @mouseleave="handleMouseLeave" :style="canvasStyle"></canvas>
+      </div>
+
+      <div class="side-panel">
+        <div class="classes-section">
+          <h4>Classes</h4>
+          <ul v-if="projectStore.currentProject?.classes?.length">
+            <li v-for="cls in projectStore.currentProject.classes" :key="cls" @click="selectClass(cls)" :style="{ backgroundColor: getColorForClass(cls) }">
+              {{ cls }} ({{ countAnnotationsByClass(cls) }})
+            </li>
+          </ul>
+          <p v-else>No classes defined for this project yet.</p>
+        </div>        <div class="layers-section">
+          <h4>Layers (Annotations)</h4>
+          <div class="layers-controls">
+            <button @click="selectAllAnnotations" class="select-all-btn">Select All</button>
+            <button @click="deleteSelectedAnnotations" class="delete-selected-btn" :disabled="selectedAnnotationIds.length === 0">
+              Delete Selected ({{ selectedAnnotationIds.length }})
+            </button>
+          </div>
+          <ul v-if="annotationStore.currentAnnotations.length">
+            <li v-for="(ann, index) in annotationStore.currentAnnotations" :key="ann._id"
+                @mouseover="highlightAnnotation(ann)" @mouseleave="unhighlightAnnotation"
+                :class="{ 
+                  'highlighted': highlightedAnnotationId === ann._id, 
+                  'editing': editingAnnotationId === ann._id,
+                  'has-history': hasAnnotationHistory(ann._id),
+                  'selected': isAnnotationSelected(ann._id)
+                }"
+                :style="{ borderLeftColor: getColorForClass(ann.label) }">
+              <div class="annotation-item">
+                <div class="annotation-checkbox">
+                  <input type="checkbox" :id="'select-' + ann._id" 
+                         :checked="isAnnotationSelected(ann._id)"
+                         @change="toggleAnnotationSelection(ann._id)" />
+                </div>
+                <span class="annotation-label">
+                  {{ ann.label }} #{{ index + 1 }}
+                  <small v-if="hasAnnotationHistory(ann._id)" title="This annotation has undo/redo history" class="history-indicator">★</small>
+                </span>
+                <div class="annotation-buttons">
+                  <button @click="startEditingAnnotation(ann)" class="edit-ann-btn" title="Edit this annotation">Edit</button>
+                  <button @click="deleteExistingAnnotation(ann._id)" class="delete-ann-btn" title="Delete this annotation">Delete</button>
+                </div>
+              </div>
+            </li>
+          </ul>
+          <p v-else>No annotations yet.</p>
+        </div>        <div class="raw-data-section">
+          <h4>Raw Annotation Data</h4>
+          <button @click="showRawData = !showRawData">{{ showRawData ? 'Hide' : 'Show' }} Raw Data</button>
+          <button @click="nameAnnotationsWithLLM" :disabled="namingAnnotations || annotationStore.currentAnnotations.length === 0" 
+                  class="name-annotations-btn" :class="{ 'processing': namingAnnotations }">
+            <span v-if="!namingAnnotations">Name Annotations with AI</span>
+            <span v-else class="naming-status">
+              <span class="spinner"></span>
+              {{ namingStatus }}
+            </span>
+          </button>
+          <div v-if="namingAnnotations" class="naming-progress">
+            Processing {{ annotationStore.currentAnnotations.length }} annotations with AI...
+          </div>
+          <div v-if="showRawData">
+            <div v-if="rawDataError" class="error-message">
+              Error displaying raw data: {{ rawDataError }}
+            </div>
+            <pre v-else>{{ safeStringifiedAnnotations }}</pre>
+          </div>
+        </div>
+
+        <div class="image-tags-section">
+          <h4>Image Tags</h4>
+          <div class="tags-display" v-if="currentImageTags.length">
+            <span v-for="tag in currentImageTags" :key="tag" class="tag-pill">
+              {{ tag }}
+              <button @click="removeTag(tag)" class="remove-tag-btn">&times;</button>
+            </span>
+          </div>
+          <p v-else>No tags for this image yet.</p>
+          <div class="add-tag-input">
+            <input type="text" v-model="newTagInput" @keyup.enter="addTag" placeholder="Add a tag..." />
+            <button @click="addTag">Add</button>
+          </div>
+          <p v-if="tagError" class="error">{{ tagError }}</p>
+        </div>
+
+        <!-- Detection Settings Section -->
+        <div class="detection-settings-section">
+          <h4>Detection Settings</h4>
+          <div class="detection-method">
+            <label>Detection Method:</label>
+            <select v-model="detectionMethod">
+              <option value="yolo">YOLO (Machine Learning)</option>
+              <option value="opencv">OpenCV Contour Detection</option>
+              <option value="ssim">Structural Similarity (SSIM)</option>
+            </select>
+          </div>
+          
+          <div class="detection-params" v-if="detectionMethod === 'opencv'">
+            <div class="param-group">
+              <label>Sensitivity:</label>
+              <input type="range" v-model.number="detectionParams.sensitivity" min="0.1" max="0.9" step="0.1" />
+              <span>{{ detectionParams.sensitivity }}</span>
+            </div>
+            <div class="param-group">
+              <label>Min Area:</label>
+              <input type="number" v-model.number="detectionParams.minArea" min="10" max="10000" step="10" />
+            </div>
+          </div>
+          
+          <div class="detection-params" v-if="detectionMethod === 'ssim'">
+            <p>Select a reference image to compare with:</p>
+            <select v-model="referenceImageId" @change="loadReferenceImage">
+              <option value="">None (Select an image)</option>
+              <option v-for="img in imageStore.allImages" :key="img._id" :value="img._id">
+                {{ img.name }}
+              </option>
+            </select>
+            <div v-if="referenceImagePreview" class="reference-image-preview">
+              <img :src="referenceImagePreview" alt="Reference Image" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Class Input Modal -->
+    <div v-if="showClassModal" class="modal-overlay">
+      <div class="modal-content">        <h3>Assign Class</h3>
+        <input type="text" v-model="currentClassName" placeholder="Enter class name" @keyup.enter="confirmClassInput"/>
+        <div>
+            <p>Existing classes:</p>
+            <button v-for="cls in projectStore.currentProject?.classes || []" :key="cls" @click="selectClass(cls)">
+                {{ cls }}
+            </button>
+        </div>
+        <button @click="confirmClassInput">Confirm</button>
+        <button @click="cancelClassInput">Cancel</button>
+        <p v-if="classModalError" class="error">{{ classModalError }}</p>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+// Import necessary functions
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { useToast } from 'vue-toastification';
+
+// Import our stores and services
+import { useProjectStore } from '../store/projectStore';
+import { useImageStore } from '../store/imageStore';
+import { useAnnotationStore } from '../store/annotationStore';
+import { detectObjectsInImage } from '../services/detectionService';
+import { nameAnnotationsWithLLM as nameWithLLM } from '../services/llmService';
+
+// Component state
+const route = useRoute();
+const router = useRouter();
+const toast = useToast();
+const projectStore = useProjectStore();
+const imageStore = useImageStore();
+const annotationStore = useAnnotationStore();
+
+// Get route params
+const projectId = ref(route.params.projectId);
+const imageId = ref(route.params.imageId);
+
+// Function to generate a consistent color for a class label
+function getColorForClass(className) {
+  if (!className) return '#808080'; // Default gray for undefined class
+  
+  // Predefined color palette for better readability and contrast
+  const colorPalette = [
+    '#3498db', // Blue
+    '#2ecc71', // Green
+    '#e74c3c', // Red
+    '#f39c12', // Orange
+    '#9b59b6', // Purple
+    '#1abc9c', // Teal
+    '#d35400', // Dark Orange
+    '#c0392b', // Dark Red
+    '#16a085', // Dark Teal
+    '#8e44ad', // Dark Purple
+    '#27ae60', // Dark Green
+    '#2980b9', // Dark Blue
+    '#f1c40f', // Yellow
+    '#7f8c8d', // Gray
+    '#34495e', // Navy
+    '#e67e22'  // Pumpkin
+  ];
+  
+  // Simple string hash function to get consistent index from class name
+  let hash = 0;
+  for (let i = 0; i < className.length; i++) {
+    hash = ((hash << 5) - hash) + className.charCodeAt(i);
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  
+  // Use absolute value of hash to get positive index
+  const index = Math.abs(hash) % colorPalette.length;
+  
+  return colorPalette[index];
+}
+
+// Canvas and image refs
+const canvasRef = ref(null);
+const imageRef = ref(null);
+const canvasContainerRef = ref(null);
+let ctx = null;
+
+// Drawing state variables
+const drawing = ref(false);
+const startX = ref(0);
+const startY = ref(0);
+const currentX = ref(0);
+const currentY = ref(0);
+const currentTool = ref('rectangle'); // Default tool
+const imageUrl = ref('');
+const imageDimensions = ref({
+  width: 0,
+  height: 0,
+  naturalWidth: 0,
+  naturalHeight: 0
+});
+const startPos = ref({ x: 0, y: 0 });
+const currentRectRaw = ref(null);
+const pendingAnnotationCoordinates = ref(null);
+const showClassModal = ref(false);
+const currentClassName = ref('');
+const classModalError = ref('');
+
+// Panning state
+const isPanning = ref(false);
+const viewOffset = ref({ x: 0, y: 0 });
+const startPanPoint = ref({ x: 0, y: 0 });
+const panLastClientPos = ref({ x: 0, y: 0 });
+
+// Zoom state
+const zoomLevel = ref(1);
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 5;
+const ZOOM_STEP = 0.1;
+
+// Selection state
+const selectedAnnotationIds = ref([]);
+const selectedAnnotation = ref(null); // For dragging
+const isDraggingAnnotation = ref(false);
+const dragStartPos = ref({ x: 0, y: 0 });
+const dragStartRect = ref(null);
+
+// Annotation naming state
+const namingAnnotations = ref(false);
+const namingStatus = ref('');
+const namingProgress = ref(0);
+
+// Tags state
+const currentImageTags = ref([]);
+const newTagInput = ref('');
+const tagError = ref('');
+
+// Detection method configuration
+const detectionMethod = ref('yolo'); // 'yolo', 'opencv', or 'ssim'
+const detectionParams = ref({
+  sensitivity: 0.5,   // For OpenCV - edge detection sensitivity (0.1-0.9)
+  minArea: 100,       // For OpenCV - minimum contour area to consider
+  maxArea: null       // For OpenCV - maximum contour area to consider (null = auto)
+});
+const referenceImageId = ref(''); // For SSIM comparison
+const referenceImagePreview = ref(''); // Preview of reference image for SSIM
+const referenceImageData = ref(null); // To store the base64 data of the reference image
+
+const highlightedAnnotationId = ref(null);
+const showRawData = ref(false);
+const rawDataError = ref(null);
+
+// Computed property for safely stringifying annotations
+const safeStringifiedAnnotations = computed(() => {
+  try {
+    return JSON.stringify(annotationStore.currentAnnotations, (key, value) => {
+      // Handle potential circular references or special objects that can't be serialized
+      if (key === '_reactiveChains' || key === '_reactiveFlags' || typeof value === 'function') {
+        return undefined; // Skip reactivity metadata and functions
+      }
+      return value;
+    }, 2);
+  } catch (error) {
+    console.error('Error stringifying annotations:', error);
+    rawDataError.value = error.message || 'Unknown error';
+    return '';
+  }
+});
+
+// Editing state
+const editingAnnotationId = ref(null);
+const isResizing = ref(false);
+const activeResizeHandle = ref(null); // e.g., 'topLeft', 'bottomRight', 'top', 'left', etc.
+const originalAnnotationBeforeEdit = ref(null); // Stores the annotation state when editing began
+const resizeStartPos = ref({ x: 0, y: 0 }); // Mouse position when resize starts
+const originalResizingAnnotation = ref(null); // Annotation state at the start of a specific resize drag
+
+
+// Undo/Redo state
+const undoStack = ref([]);
+const redoStack = ref([]);
+const MAX_UNDO_HISTORY = 20; // Maximum number of actions in the undo history
+const undoLimitReached = ref(false); // Flag to indicate if the undo history limit has been reached
+
+const detectingShapes = ref(false); // Flag to indicate if shape detection is in progress
+const defaultDetectionClass = ref('auto-detected'); // Default class name for auto-detected shapes
+
+const canUndo = computed(() => undoStack.value.length > 0);
+const canRedo = computed(() => redoStack.value.length > 0);
+
+// Computed styles for the canvas and image to handle zooming and panning
+const imageStyle = computed(() => ({
+  position: 'absolute',
+  width: `${imageDimensions.value.width * zoomLevel.value}px`,
+  height: `${imageDimensions.value.height * zoomLevel.value}px`,
+  transform: `translate(${viewOffset.value.x}px, ${viewOffset.value.y}px)`,
+  transformOrigin: 'top left',
+  userSelect: 'none',
+  pointerEvents: isPanning.value ? 'none' : 'auto'
+}));
+
+const canvasStyle = computed(() => ({
+  position: 'absolute',
+  width: `${imageDimensions.value.width * zoomLevel.value}px`,
+  height: `${imageDimensions.value.height * zoomLevel.value}px`,
+  transform: `translate(${viewOffset.value.x}px, ${viewOffset.value.y}px)`,
+  transformOrigin: 'top left',
+  cursor: currentTool.value === 'pan' ? (isPanning.value ? 'grabbing' : 'grab') : 
+          currentTool.value === 'select' ? (isDraggingAnnotation.value ? 'grabbing' : 'pointer') : 
+          isResizing.value ? 'grabbing' :
+          'crosshair',
+  zIndex: 10
+}));
+
+// Function to add an action to the undo stack and manage its size
+function addToUndoStack(action) {
+  // Ensure action has a timestamp - use high precision timestamp to avoid ordering issues
+  if (!action.timestamp) {
+    action.timestamp = Date.now() + (performance.now() / 1000); // Add fractional milliseconds for more precise ordering
+  }
+  
+  // Add action to the end of the stack (newest actions at the end)
+  undoStack.value.push(action);
+  undoLimitReached.value = false;
+  
+  // We no longer sort the stack - instead we rely on the natural order of actions
+  // being added to the stack chronologically, which is more reliable for undo/redo
+  
+  // If we exceed the maximum history size, remove the oldest action
+  if (undoStack.value.length > MAX_UNDO_HISTORY) {
+    undoStack.value.shift(); // Remove the oldest action (at index 0)
+    undoLimitReached.value = true;
+    console.log(`Undo history limit reached (${MAX_UNDO_HISTORY} actions). Oldest action removed.`);
+  }
+  
+  // Clear the redo stack when a new action is performed
+  redoStack.value = [];
+  
+  console.log(`Added to undo stack: ${action.type} action with ID ${action.annotationId || (action.annotationData && action.annotationData._id) || 'unknown'}`);
+}
+
+// Undo/Redo functions
+function undo() {
+  if (!canUndo.value) return;
+  
+  // Get the last action from the undo stack
+  const action = undoStack.value.pop();
+  
+  if (!action) return;
+  
+  console.log('Undoing action:', action);
+  
+  // Depending on the action type, perform the reverse operation
+  switch (action.type) {
+    case 'CREATE':
+      // If we created an annotation, delete it to undo
+      if (action.annotationId) {
+        annotationStore.deleteAnnotation(action.annotationId, projectId.value, imageId.value)
+          .then(() => {
+            toast.info(`Undid creation of ${action.annotationData?.label || 'unknown'} annotation`);
+            
+            // Add to redo stack
+            redoStack.value.push(action);
+          })
+          .catch(error => {
+            console.error('Error undoing annotation creation:', error);
+            toast.error('Failed to undo annotation creation');
+            
+            // Put the action back on the undo stack since it failed
+            undoStack.value.push(action);
+          });
+      }
+      break;
+      
+    case 'UPDATE':
+      // If we updated an annotation, restore its previous state
+      if (action.annotationId && action.oldData) {
+        annotationStore.updateAnnotation(action.oldData, projectId.value, imageId.value)
+          .then(() => {
+            toast.info(`Undid update to ${action.oldData?.label || 'unknown'} annotation`);
+            
+            // Add to redo stack
+            redoStack.value.push(action);
+          })
+          .catch(error => {
+            console.error('Error undoing annotation update:', error);
+            toast.error('Failed to undo annotation update');
+            
+            // Put the action back on the undo stack since it failed
+            undoStack.value.push(action);
+          });
+      }
+      break;
+      
+    case 'DELETE':
+      // If we deleted an annotation, recreate it to undo
+      if (action.annotationData) {
+        // Remove the _id field when recreating to avoid conflicts
+        const { _id, ...annotationWithoutId } = action.annotationData;
+        
+        annotationStore.createAnnotation(annotationWithoutId, projectId.value, imageId.value)
+          .then(createdAnnotation => {
+            toast.info(`Undid deletion of ${action.annotationData?.label || 'unknown'} annotation`);
+            
+            // Update the action with the new annotation ID for redo
+            const redoAction = {
+              ...action,
+              annotationId: createdAnnotation._id
+            };
+            
+            // Add to redo stack
+            redoStack.value.push(redoAction);
+          })
+          .catch(error => {
+            console.error('Error undoing annotation deletion:', error);
+            toast.error('Failed to undo annotation deletion');
+            
+            // Put the action back on the undo stack since it failed
+            undoStack.value.push(action);
+          });
+      }
+      break;
+      
+    case 'MULTI_DELETE':
+      // If we deleted multiple annotations, recreate them all
+      if (action.annotationData && Array.isArray(action.annotationData)) {
+        // Create an array of promises for creating each annotation
+        const createPromises = action.annotationData.map(annData => {
+          // Remove the _id field when recreating
+          const { _id, ...annotationWithoutId } = annData;
+          return annotationStore.createAnnotation(annotationWithoutId, projectId.value, imageId.value);
+        });
+        
+        Promise.all(createPromises)
+          .then(createdAnnotations => {
+            toast.info(`Undid deletion of ${createdAnnotations.length} annotations`);
+            
+            // Update the action with the new annotation IDs for redo
+            const redoAction = {
+              ...action,
+              annotationIds: createdAnnotations.map(ann => ann._id)
+            };
+            
+            // Add to redo stack
+            redoStack.value.push(redoAction);
+          })
+          .catch(error => {
+            console.error('Error undoing multiple annotation deletion:', error);
+            toast.error('Failed to undo multiple annotation deletion');
+            
+            // Put the action back on the undo stack since it failed
+            undoStack.value.push(action);
+          });
+      }
+      break;
+      
+    default:
+      console.warn('Unknown action type:', action.type);
+      break;
+  }
+}
+
+function redo() {
+  if (!canRedo.value) return;
+  
+  // Get the last action from the redo stack
+  const action = redoStack.value.pop();
+  
+  if (!action) return;
+  
+  console.log('Redoing action:', action);
+  
+  // Depending on the action type, re-perform the operation
+  switch (action.type) {
+    case 'CREATE':
+      // If the original action was create, recreate the annotation
+      if (action.annotationData) {
+        annotationStore.createAnnotation(action.annotationData, projectId.value, imageId.value)
+          .then(createdAnnotation => {
+            toast.info(`Redid creation of ${action.annotationData?.label || 'unknown'} annotation`);
+            
+            // Add to undo stack
+            addToUndoStack({
+              ...action,
+              annotationId: createdAnnotation._id
+            });
+          })
+          .catch(error => {
+            console.error('Error redoing annotation creation:', error);
+            toast.error('Failed to redo annotation creation');
+            
+            // Put the action back on the redo stack since it failed
+            redoStack.value.push(action);
+          });
+      }
+      break;
+      
+    case 'UPDATE':
+      // If the original action was update, reapply the update
+      if (action.annotationId && action.newData) {
+        annotationStore.updateAnnotation(action.newData, projectId.value, imageId.value)
+          .then(() => {
+            toast.info(`Redid update to ${action.newData?.label || 'unknown'} annotation`);
+            
+            // Add to undo stack
+            addToUndoStack(action);
+          })
+          .catch(error => {
+            console.error('Error redoing annotation update:', error);
+            toast.error('Failed to redo annotation update');
+            
+            // Put the action back on the redo stack since it failed
+            redoStack.value.push(action);
+          });
+      }
+      break;
+      
+    case 'DELETE':
+      // If the original action was delete, delete the annotation again
+      if (action.annotationId) {
+        annotationStore.deleteAnnotation(action.annotationId, projectId.value, imageId.value)
+          .then(() => {
+            toast.info(`Redid deletion of ${action.annotationData?.label || 'unknown'} annotation`);
+            
+            // Add to undo stack
+            addToUndoStack(action);
+          })
+          .catch(error => {
+            console.error('Error redoing annotation deletion:', error);
+            toast.error('Failed to redo annotation deletion');
+            
+            // Put the action back on the redo stack since it failed
+            redoStack.value.push(action);
+          });
+      }
+      break;
+      
+    case 'MULTI_DELETE':
+      // If the original action was multi-delete, delete all annotations again
+      if (action.annotationIds && Array.isArray(action.annotationIds)) {
+        // Create an array of promises for deleting each annotation
+        const deletePromises = action.annotationIds.map(id => 
+          annotationStore.deleteAnnotation(id, projectId.value, imageId.value)
+        );
+        
+        Promise.all(deletePromises)
+          .then(() => {
+            toast.info(`Redid deletion of ${action.annotationIds.length} annotations`);
+            
+            // Add to undo stack
+            addToUndoStack(action);
+          })
+          .catch(error => {
+            console.error('Error redoing multiple annotation deletion:', error);
+            toast.error('Failed to redo multiple annotation deletion');
+            
+            // Put the action back on the redo stack since it failed
+            redoStack.value.push(action);
+          });
+      }
+      break;
+      
+    default:
+      console.warn('Unknown action type:', action.type);
+      break;
+  }
+}
+
+// Functions for the class input modal
+function confirmClassInput() {
+  if (!currentClassName.value) {
+    classModalError.value = 'Please enter a class name';
+    return;
+  }
+  
+  // Reset error message
+  classModalError.value = '';
+  
+  // If we have pending annotation coordinates, create the annotation
+  if (pendingAnnotationCoordinates.value) {
+    const newAnnotation = {
+      label: currentClassName.value,
+      ...pendingAnnotationCoordinates.value
+    };
+    
+    // Save the annotation to the database
+    annotationStore.createAnnotation(newAnnotation, projectId.value, imageId.value)
+      .then(createdAnnotation => {
+        toast.success(`Created ${currentClassName.value} annotation`);
+        
+        // Add to undo stack
+        addToUndoStack({
+          type: 'CREATE',
+          timestamp: Date.now(),
+          annotationId: createdAnnotation._id,
+          annotationData: { ...createdAnnotation }
+        });
+        
+        // Reset pending coordinates
+        pendingAnnotationCoordinates.value = null;
+      })
+      .catch(error => {
+        console.error('Error creating annotation:', error);
+        toast.error('Failed to create annotation');
+      });
+  }
+  
+  // Check if the class name is already in the project's classes
+  const currentProject = projectStore.currentProject;
+  if (currentProject && (!currentProject.classes || !currentProject.classes.includes(currentClassName.value))) {
+    // Add the class to the project if it doesn't exist
+    const updatedClasses = [...(currentProject.classes || []), currentClassName.value];
+    
+    projectStore.updateProject({
+      ...currentProject,
+      classes: updatedClasses
+    })
+    .then(() => {
+      console.log(`Added new class ${currentClassName.value} to project`);
+    })
+    .catch(error => {
+      console.error('Error updating project classes:', error);
+    });
+  }
+  
+  // Close the modal
+  showClassModal.value = false;
+}
+
+function cancelClassInput() {
+  // Reset the state and close the modal
+  pendingAnnotationCoordinates.value = null;
+  showClassModal.value = false;
+  classModalError.value = '';
+}
+
+// Functions for annotation highlighting
+function highlightAnnotation(annotation) {
+  if (annotation && annotation._id) {
+    highlightedAnnotationId.value = annotation._id;
+    redrawCanvas();
+  }
+}
+
+function unhighlightAnnotation() {
+  highlightedAnnotationId.value = null;
+  redrawCanvas();
+}
+
+// Function to check if an annotation is selected
+function isAnnotationSelected(annotationId) {
+  return selectedAnnotationIds.value.includes(annotationId);
+}
+
+function toggleAnnotationSelection(annotationId) {
+  if (isAnnotationSelected(annotationId)) {
+    // Remove from selected annotations
+    selectedAnnotationIds.value = selectedAnnotationIds.value.filter(id => id !== annotationId);
+  } else {
+    // Add to selected annotations
+    selectedAnnotationIds.value.push(annotationId);
+  }
+  redrawCanvas();
+}
+
+function selectAllAnnotations() {
+  selectedAnnotationIds.value = annotationStore.currentAnnotations.map(ann => ann._id);
+  redrawCanvas();
+}
+
+function deleteSelectedAnnotations() {
+  if (selectedAnnotationIds.value.length === 0) return;
+  
+  // Store the annotations for undo functionality
+  const annotationsToDelete = annotationStore.currentAnnotations.filter(ann => 
+    selectedAnnotationIds.value.includes(ann._id)
+  );
+  
+  // Add a single undo action for all deleted annotations
+  addToUndoStack({
+    type: 'MULTI_DELETE',
+    timestamp: Date.now(),
+    annotationIds: [...selectedAnnotationIds.value],
+    annotationData: annotationsToDelete.map(ann => ({ ...ann }))
+  });
+  
+  // Delete each annotation
+  const deletePromises = selectedAnnotationIds.value.map(id => 
+    annotationStore.deleteAnnotation(id, projectId.value, imageId.value)
+  );
+  
+  Promise.all(deletePromises)
+    .then(() => {
+      toast.success(`Deleted ${selectedAnnotationIds.value.length} annotations`);
+      selectedAnnotationIds.value = [];
+    })
+    .catch(error => {
+      console.error('Error deleting multiple annotations:', error);
+      toast.error('Failed to delete some annotations');
+    });
+}
+
+// Function to delete an existing annotation
+function deleteExistingAnnotation(annotationId) {
+  if (!annotationId) return;
+  
+  // Find the annotation in the current list
+  const annotationToDelete = annotationStore.currentAnnotations.find(ann => ann._id === annotationId);
+  if (!annotationToDelete) {
+    console.error(`Annotation with ID ${annotationId} not found`);
+    return;
+  }
+  
+  // Confirm deletion
+  if (!confirm(`Are you sure you want to delete this ${annotationToDelete.label} annotation?`)) {
+    return;
+  }
+  
+  // Store the annotation for undo stack
+  const annotationCopy = { ...annotationToDelete };
+  
+  // Add to undo stack
+  addToUndoStack({
+    type: 'DELETE',
+    timestamp: Date.now(),
+    annotationId: annotationId,
+    annotationData: annotationCopy
+  });
+  
+  // Delete the annotation from the store
+  annotationStore.deleteAnnotation(annotationId, projectId.value, imageId.value)
+    .then(() => {
+      toast.success(`Deleted ${annotationToDelete.label} annotation`);
+      
+      // If we were editing this annotation, clear the editing state
+      if (editingAnnotationId.value === annotationId) {
+        finishEditingAnnotation();
+      }
+      
+      // If it was in selected annotations, remove it
+      if (selectedAnnotationIds.value.includes(annotationId)) {
+        selectedAnnotationIds.value = selectedAnnotationIds.value.filter(id => id !== annotationId);
+      }
+    })
+    .catch(error => {
+      console.error('Error deleting annotation:', error);
+      toast.error('Failed to delete annotation');
+    });
+}
+
+// Function to auto-detect shapes in the image
+async function detectShapes() {
+  if (detectingShapes.value || !imageUrl.value) {
+    return;
+  }
+  
+  detectingShapes.value = true;
+  
+  try {
+    toast.info(`Detecting shapes using ${detectionMethod.value} method...`);
+    
+    // Prepare parameters for detection
+    const detectionConfig = {
+      method: detectionMethod.value,
+      params: { ...detectionParams.value }
+    };
+    
+    // Include reference image for SSIM method
+    if (detectionMethod.value === 'ssim' && referenceImageData.value) {
+      detectionConfig.referenceImage = referenceImageData.value;
+    }
+    
+    // Call the detection service
+    const detectedObjects = await detectObjectsInImage(
+      imageId.value,
+      detectionConfig
+    );
+    
+    if (!detectedObjects || detectedObjects.length === 0) {
+      toast.info('No shapes were detected in the image');
+      return;
+    }
+    
+    // Create annotations for each detected object
+    const createPromises = detectedObjects.map(obj => {
+      // Convert detection coordinates to annotation format
+      // Note: The detection service might return coordinates in different formats
+      // depending on the detection method, so we normalize here
+      const newAnnotation = {
+        label: obj.class || defaultDetectionClass.value,
+        x: obj.x || obj.bbox[0],
+        y: obj.y || obj.bbox[1],
+        width: obj.width || obj.bbox[2],
+        height: obj.height || obj.bbox[3],
+        confidence: obj.confidence || null,
+        detectionMethod: detectionMethod.value
+      };
+      
+      return annotationStore.createAnnotation(newAnnotation, projectId.value, imageId.value);
+    });
+    
+    const createdAnnotations = await Promise.all(createPromises);
+    
+    // Add all created annotations to a single undo action for better UX
+    if (createdAnnotations.length > 0) {
+      addToUndoStack({
+        type: 'MULTI_CREATE',
+        timestamp: Date.now(),
+        annotationIds: createdAnnotations.map(ann => ann._id),
+        annotationData: createdAnnotations.map(ann => ({ ...ann }))
+      });
+      
+      toast.success(`Created ${createdAnnotations.length} annotations from detected shapes`);
+    }
+  }
+
+// Function to name annotations using LLM
+async function nameAnnotationsWithLLM() {
+  if (namingAnnotations.value || !imageUrl.value || !annotationStore.currentAnnotations.length) {
+    return;
+  }
+  
+  namingAnnotations.value = true;
+  namingStatus.value = 'Starting naming process...';
+  namingProgress.value = 0;
+  
+  try {
+    // Show toast to indicate the process is starting
+    toast.info(`Starting automatic naming of ${annotationStore.currentAnnotations.length} annotations...`);
+    
+    // Call the LLM service to name annotations
+    const namedAnnotations = await nameWithLLM(imageUrl.value, annotationStore.currentAnnotations);
+    
+    if (!namedAnnotations || !namedAnnotations.length) {
+      throw new Error('No annotations returned from naming service');
+    }
+    
+    namingStatus.value = 'Updating annotations...';
+    
+    // Update each annotation with its new name/label
+    const updatePromises = namedAnnotations.map((namedAnn, index) => {
+      // Find the corresponding annotation in our current set
+      const originalAnn = annotationStore.currentAnnotations.find(ann => ann._id === namedAnn._id);
+      
+      if (!originalAnn) {
+        console.warn(`Could not find original annotation for named annotation ${namedAnn._id}`);
+        return Promise.resolve();
+      }
+      
+      // Skip update if the label is unchanged
+      if (originalAnn.label === namedAnn.label) {
+        return Promise.resolve();
+      }
+      
+      // Track progress
+      namingProgress.value = Math.round((index / namedAnnotations.length) * 100);
+      
+      // Create a copy of the original annotation for undo stack
+      const oldAnnotation = { ...originalAnn };
+      
+      // Update the annotation with the new label
+      return annotationStore.updateAnnotation({
+        ...originalAnn,
+        label: namedAnn.label
+      }, projectId.value, imageId.value)
+      .then(() => {
+        // Add to undo stack
+        addToUndoStack({
+          type: 'UPDATE',
+          timestamp: Date.now(),
+          annotationId: oldAnnotation._id,
+          oldData: oldAnnotation,
+          newData: { ...oldAnnotation, label: namedAnn.label }
+        });
+        
+        return namedAnn.label;
+      });
+    });
+    
+    // Wait for all updates to complete
+    const results = await Promise.all(updatePromises);
+    
+    // Count successful updates
+    const changedCount = results.filter(Boolean).length;
+    
+    if (changedCount > 0) {
+      toast.success(`Successfully named ${changedCount} annotations`);
+    } else {
+      toast.info('No changes made to annotation labels');
+    }
+    
+    namingStatus.value = 'Complete';
+  } catch (error) {
+    console.error('Error naming annotations with LLM:', error);
+    toast.error(`Failed to name annotations: ${error.message || 'Unknown error'}`);
+    namingStatus.value = 'Failed';
+  } finally {
+    namingAnnotations.value = false;
+    namingProgress.value = 100;
+  }
+}
+
+// Zoom functions implementation
+function zoomIn() {
+  const prevZoomLevel = zoomLevel.value;
+  zoomLevel.value = Math.min(zoomLevel.value + ZOOM_STEP, MAX_ZOOM);
+  
+  // Only apply the zoom offset update if zoom actually changed
+  if (prevZoomLevel !== zoomLevel.value) {
+    updateZoomOffset();
+  }
+  
+  redrawCanvas();
+}
+
+function zoomOut() {
+  const prevZoomLevel = zoomLevel.value;
+  zoomLevel.value = Math.max(zoomLevel.value - ZOOM_STEP, MIN_ZOOM);
+  
+  // Only apply the zoom offset update if zoom actually changed
+  if (prevZoomLevel !== zoomLevel.value) {
+    updateZoomOffset();
+  }
+  
+  redrawCanvas();
+}
+
+function resetZoom() {
+  const prevZoomLevel = zoomLevel.value;
+  zoomLevel.value = 1;
+  
+  // Only apply the zoom offset update if zoom actually changed
+  if (prevZoomLevel !== zoomLevel.value) {
+    // When resetting zoom, also reset the view offset
+    viewOffset.value = { x: 0, y: 0 };
+  }
+  
+  redrawCanvas();
+}
+
+// Update view offset when zooming to keep the center point fixed
+function updateZoomOffset() {
+  if (!canvasContainerRef.value) return;
+  
+  // Get the container dimensions
+  const containerRect = canvasContainerRef.value.getBoundingClientRect();
+  
+  // Calculate the offset needed to keep the center point fixed during zoom
+  const imageWidth = imageDimensions.value.width * zoomLevel.value;
+  const imageHeight = imageDimensions.value.height * zoomLevel.value;
+  
+  // Center the image in the container - this is key to preventing the upper-right shift
+  // This ensures the image is centered regardless of zoom level
+  const newOffsetX = Math.max((containerRect.width - imageWidth) / 2, 0);
+  const newOffsetY = Math.max((containerRect.height - imageHeight) / 2, 0);
+  
+  // Update the view offset smoothly to maintain relative position
+  viewOffset.value = { 
+    x: newOffsetX, 
+    y: newOffsetY 
+  };
+  
+  // Log the new offset for debugging
+  console.log(`New view offset after zoom: (${newOffsetX}, ${newOffsetY})`);
+}
+
+// Test function for zoom annotation behavior
+function runAnnotationZoomTest() {
+  if (annotationStore.currentAnnotations.length === 0) {
+    toast.info("No annotations to test zoom functionality with");
+    return;
+  }
+  
+  // Log the current state
+  console.log("Starting annotation zoom test:");
+  console.log("Current zoom level:", zoomLevel.value);
+  console.log("Current view offset:", viewOffset.value);
+  
+  // Log a sample annotation before zooming
+  const sampleAnnotation = annotationStore.currentAnnotations[0];
+  console.log("Sample annotation before zoom:", {
+    id: sampleAnnotation._id,
+    label: sampleAnnotation.label,
+    x: sampleAnnotation.x,
+    y: sampleAnnotation.y,
+    width: sampleAnnotation.width,
+    height: sampleAnnotation.height
+  });
+  
+  // Perform a zoom in
+  console.log("Zooming in...");
+  zoomIn();
+  
+  // Log the state after zooming
+  console.log("After zoom level:", zoomLevel.value);
+  console.log("After view offset:", viewOffset.value);
+  
+  // Log canvas dimensions
+  console.log("Canvas dimensions:", {
+    width: canvasRef.value.width,
+    height: canvasRef.value.height,
+    style: {
+      width: `${imageDimensions.value.width * zoomLevel.value}px`,
+      height: `${imageDimensions.value.height * zoomLevel.value}px`
+    }
+  });
+  
+  // Redraw to ensure annotations are correctly positioned
+  redrawCanvas();
+  
+  toast.info(`Zoom test complete. Check console for details.`);
+}
+
+// Function to redraw the canvas with all annotations properly positioned
+function redrawCanvas() {
+  if (!canvasRef.value || !ctx) return;
+  
+  // Clear the canvas
+  ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height);
+  
+  // Draw all annotations with proper scaling for zoom
+  annotationStore.currentAnnotations.forEach(annotation => {
+    // Determine if this annotation is highlighted, selected, or being edited
+    const isHighlighted = annotation._id === highlightedAnnotationId.value;
+    const isSelected = selectedAnnotationIds.value.includes(annotation._id);
+    const isEditing = annotation._id === editingAnnotationId.value;
+    
+    // Draw the annotation with the appropriate styling
+    drawAnnotation(annotation, isHighlighted, isSelected, isEditing);
+  });
+  
+  // Draw the current rectangle if we're in the middle of drawing
+  if (drawing.value && currentRectRaw.value) {
+    drawRectangle(
+      currentRectRaw.value.x,
+      currentRectRaw.value.y,
+      currentRectRaw.value.width,
+      currentRectRaw.value.height,
+      'rgba(255, 255, 0, 0.5)',  // Yellow with transparency
+      2
+    );
+  }
+}
+
+// Draw an individual annotation on the canvas
+function drawAnnotation(annotation, isHighlighted, isSelected, isEditing) {
+  // Get the color for this class
+  const color = annotation.color || getColorForClass(annotation.label);
+  
+  // Determine the style based on the annotation state
+  let strokeColor = color;
+  let fillColor = `${color}33`; // 20% opacity version of the color
+  let lineWidth = 2;
+  
+  if (isHighlighted) {
+    fillColor = `${color}66`; // 40% opacity when highlighted
+    lineWidth = 3;
+  }
+  
+  if (isSelected) {
+    strokeColor = '#ffffff'; // White outline for selected annotations
+    lineWidth = 3;
+    // Draw a second outline in the class color
+    drawRectangle(
+      annotation.x,
+      annotation.y,
+      annotation.width,
+      annotation.height,
+      color,
+      5,
+      false
+    );
+  }
+  
+  if (isEditing) {
+    strokeColor = '#ffcc00'; // Gold outline for editing
+    fillColor = `${color}99`; // 60% opacity when editing
+    lineWidth = 3;
+  }
+  
+  // Draw the annotation rectangle
+  drawRectangle(
+    annotation.x,
+    annotation.y,
+    annotation.width,
+    annotation.height,
+    strokeColor,
+    lineWidth,
+    true,
+    fillColor
+  );
+  
+  // Draw a label if the annotation is highlighted, selected, or being edited
+  if (isHighlighted || isSelected || isEditing) {
+    drawAnnotationLabel(annotation, strokeColor);
+  }
+}
+
+// Draw a rectangle on the canvas with proper zoom scaling
+function drawRectangle(x, y, width, height, strokeColor, lineWidth, isFilled, fillColor) {
+  if (!ctx) return;
+  
+  // Save the original context state
+  ctx.save();
+  
+  // Set the rectangle style
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = lineWidth;
+  
+  // Apply the zoom level to coordinates and dimensions
+  // Note: we don't apply viewOffset here because the canvas itself is already
+  // transformed with the viewOffset via its style.transform property
+  
+  // Fix: Calculate accurate scaling for coordinates and dimensions
+  // The canvas itself maintains its base size, but we scale the drawing coordinates
+  // This keeps annotations fixed to their correct image pixel positions
+  const scaledX = x * zoomLevel.value;
+  const scaledY = y * zoomLevel.value;
+  const scaledWidth = width * zoomLevel.value;
+  const scaledHeight = height * zoomLevel.value;
+  
+  // Log coords for debugging if needed
+  // console.log(`Drawing rect at (${x},${y}) scaled to (${scaledX},${scaledY}) with zoom ${zoomLevel.value}`);
+  
+  // Draw the rectangle outline
+  ctx.beginPath();
+  ctx.rect(scaledX, scaledY, scaledWidth, scaledHeight);
+  ctx.stroke();
+  
+  // Fill the rectangle if requested
+  if (isFilled && fillColor) {
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+  }
+  
+  // Restore the original context state
+  ctx.restore();
+}
+
+// Draw a label for an annotation
+function drawAnnotationLabel(annotation, color) {
+  if (!ctx) return;
+  
+  // Save the original context state
+  ctx.save();
+  
+  // Apply the zoom level to coordinates
+  const scaledX = annotation.x * zoomLevel.value;
+  const scaledY = annotation.y * zoomLevel.value;
+  
+  // Set the text style
+  ctx.font = `${Math.max(12, 12 * Math.sqrt(zoomLevel.value))}px Arial`;
+  ctx.fillStyle = 'white';
+  ctx.strokeStyle = 'black';
+  ctx.lineWidth = 2;
+  
+  // Create the label text
+  const label = annotation.label || 'unknown';
+  
+  // Draw the text background
+  const textMetrics = ctx.measureText(label);
+  const textWidth = textMetrics.width + 10; // Add some padding
+  const textHeight = 24; // Fixed height for simplicity
+  
+  // Position the label above the annotation
+  const labelX = scaledX;
+  const labelY = scaledY - textHeight - 5; // 5px gap
+  
+  // Draw text background
+  ctx.fillStyle = color;
+  ctx.fillRect(labelX, labelY, textWidth, textHeight);
+  
+  // Draw text
+  ctx.fillStyle = 'white';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, labelX + 5, labelY + (textHeight / 2)); // Center text vertically with padding
+  
+  // Restore the original context state
+  ctx.restore();
+}
+
+// Handle canvas initialization after image loads
+function onImageLoad() {
+  if (!imageRef.value || !canvasRef.value) return;
+  
+  // Store the image dimensions
+  imageDimensions.value = {
+    width: imageRef.value.width,
+    height: imageRef.value.height,
+    naturalWidth: imageRef.value.naturalWidth,
+    naturalHeight: imageRef.value.naturalHeight
+  };
+  
+  // Set canvas size to match the natural image size
+  canvasRef.value.width = imageRef.value.naturalWidth;
+  canvasRef.value.height = imageRef.value.naturalHeight;
+  
+  // Get the canvas context
+  ctx = canvasRef.value.getContext('2d');
+  
+  // Initial draw of annotations if they're already loaded
+  redrawCanvas();
+  
+  // Center the image and canvas in the container
+  updateZoomOffset();
+}
+</script>
+
+<style scoped>
+.annotation-editor-view {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.breadcrumb {
+  padding: 10px;
+  background-color: #f8f8f8;
+  border-bottom: 1px solid #ddd;
+}
+
+.breadcrumb a {
+  color: #3498db;
+  text-decoration: none;
+}
+
+.breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.editor-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.toolbar {
+  padding: 10px;
+  background-color: #fff;
+  border-right: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  width: 200px;
+}
+
+.toolbar h3 {
+  margin: 0 0 10px 0;
+  font-size: 16px;
+  color: #333;
+}
+
+.toolbar button {
+  margin-bottom: 10px;
+  padding: 10px;
+  font-size: 14px;
+  color: #333;
+  background-color: #f1f1f1;
+  border: 1px solid #ddd;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.toolbar button:hover {
+  background-color: #e1e1e1;
+}
+
+.toolbar button.active {
+  background-color: #3498db;
+  color: white;
+  border-color: #2980b9;
+}
+
+.canvas-container {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: #f9f9f9;
+  border: 1px solid #ddd;
+}
+
+canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  cursor: crosshair;
+}
+
+.side-panel {
+  width: 300px;
+  padding: 10px;
+  background-color: #fff;
+  border-left: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+}
+
+.classes-section,
+.layers-section,
+.raw-data-section,
+.image-tags-section,
+.detection-settings-section {
+  margin-bottom: 20px;
+}
+
+h4 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  color: #333;
+}
+
+ul {
+  list-style-type: none;
+  padding: 0;
+  margin: 0;
+}
+
+li {
+  padding: 8px;
+  margin-bottom: 5px;
+  background-color: #f9f9f9;
+  border: 1px solid #ddd;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+li:hover {
+  background-color: #f1f1f1;
+}
+
+.annotation-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.annotation-checkbox {
+  margin-right: 10px;
+}
+
+.annotation-label {
+  flex: 1;
+  font-size: 14px;
+  color: #333;
+}
+
+.annotation-buttons {
+  display: flex;
+  gap: 5px;
+}
+
+.edit-ann-btn,
+.delete-ann-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #fff;
+  background-color: #3498db;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.edit-ann-btn:hover,
+.delete-ann-btn:hover {
+  background-color: #2980b9;
+}
+
+.error-message {
+  color: #e74c3c;
+  background-color: #f9d6d5;
+  padding: 10px;
+  border: 1px solid #e74c3c;
+  border-radius: 4px;
+  margin-bottom: 10px;
+}
+
+.tag-pill {
+  display: inline-block;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #fff;
+  background-color: #3498db;
+  border-radius: 12px;
+  margin-right: 5px;
+  margin-bottom: 5px;
+  transition: background-color 0.3s;
+}
+
+.tag-pill:hover {
+  background-color: #2980b9;
+}
+
+.add-tag-input {
+  display: flex;
+  gap: 5px;
+}
+
+.add-tag-input input {
+  flex: 1;
+  padding: 8px;
+  font-size: 14px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.add-tag-input button {
+  padding: 8px 12px;
+  font-size: 14px;
+  color: #fff;
+  background-color: #3498db;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.add-tag-input button:hover {
+  background-color: #2980b9;
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background-color: #fff;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  max-width: 400px;
+  width: 100%;
+}
+
+.modal-content h3 {
+  margin: 0 0 15px 0;
+  font-size: 18px;
+  color: #333;
+}
+
+.modal-content input {
+  width: 100%;
+  padding: 10px;
+  font-size: 14px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  margin-bottom: 10px;
+}
+
+.modal-content button {
+  padding: 10px;
+  font-size: 14px;
+  color: #fff;
+  background-color: #3498db;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.modal-content button:hover {
+  background-color: #2980b9;
+}
+
+.processing {
+  position: relative;
+}
+
+.processing .spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.6);
+  border-top: 2px solid #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+</style>

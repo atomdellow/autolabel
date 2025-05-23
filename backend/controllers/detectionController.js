@@ -1,20 +1,23 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
 
 /**
- * Object detection using YOLOv8 through Python process
- * This integrates the Flask API functionality directly in our Node.js backend
+ * Object detection using YOLOv8 through direct Python process spawning
  */
 exports.detectObjects = async (req, res) => {
   try {
     const { image_url, screenshot } = req.body;
     if (!image_url && !screenshot) {
       return res.status(400).json({ error: "No image data (URL or base64) provided" });
-    }    // Determine which detection method to use
+    }
+    
+    // Determine which detection method to use
     const method = req.body.detectionMethod || 'yolo'; // Default to YOLO if not specified
     console.log(`Using detection method: ${method}`);
-      // Path to appropriate Python script based on method
+    
+    // Path to appropriate Python script based on method
     let pythonScriptPath;
     if (method === 'opencv' || method === 'opencv_contour') {
       pythonScriptPath = path.join(__dirname, '..', '..', 'AutoDesktopVisionApi', 'detect_contours_fixed.py');
@@ -340,5 +343,69 @@ exports.compareScreenshots = async (req, res) => {
   } catch (err) {
     console.error('Unexpected error in comparison controller:', err);
     return res.status(500).json({ error: `Server error: ${err.message}` });
+  }
+};
+
+/**
+ * Check the status of the detection server
+ * @param {Request} req - Express request object
+ * @param {Response} res - Express response object
+ */
+exports.checkServerStatus = async (req, res) => {
+  try {
+    const isRunning = await isDetectionServerRunning();
+    return res.status(200).json({
+      status: isRunning ? 'running' : 'stopped',
+      serverUrl: DETECTION_SERVER_URL,
+      message: isRunning 
+        ? 'Detection server is running and ready to process requests' 
+        : 'Detection server is not running'
+    });
+  } catch (error) {
+    console.error('Error checking server status:', error);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Error checking detection server status',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Start the detection server manually
+ * @param {Request} req - Express request object
+ * @param {Response} res - Express response object
+ */
+exports.startServer = async (req, res) => {
+  try {
+    // Check if already running
+    const isRunning = await isDetectionServerRunning();
+    if (isRunning) {
+      return res.status(200).json({
+        status: 'running',
+        message: 'Detection server is already running'
+      });
+    }
+    
+    // Attempt to start server
+    const started = await startDetectionServer();
+    if (started) {
+      return res.status(200).json({
+        status: 'started',
+        message: 'Detection server started successfully'
+      });
+    } else {
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to start detection server. Check server logs for details.'
+      });
+    }
+  } catch (error) {
+    console.error('Error starting server:', error);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Error starting detection server',
+      error: error.message
+    });
   }
 };

@@ -1,0 +1,57 @@
+/* Additional CSS for spinner animation - add to your CSS */
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  border-top-color: transparent;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.naming-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.naming-progress {
+  margin: 8px 0;
+  font-size: 0.85em;
+  color: #666;
+  font-style: italic;
+}
+
+/* Button styling */
+.name-annotations-btn {
+  background-color: #5c6bc0;
+  color: white;
+  padding: 8px 12px;
+  margin-top: 10px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.name-annotations-btn:hover:not(:disabled) {
+  background-color: #3f51b5;
+}
+
+.name-annotations-btn:disabled {
+  background-color: #9fa8da;
+  cursor: not-allowed;
+}
+
+.name-annotations-btn.processing {
+  background-color: #3f51b5;
+}
+
+/* Add this in a <style> block in your Vue component */

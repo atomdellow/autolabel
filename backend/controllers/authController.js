@@ -2,10 +2,15 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 
+// Fallback JWT secret in case the environment variable is not set
+const JWT_SECRET = process.env.JWT_SECRET || '93d0e8c755b994ff1e53fe69f73b6fdb78fa834c91319453e5854f2b3d067e4a';
+
 // Generate JWT
 const generateToken = (id) => {
     console.log(`[authController.js] generateToken - Generating token for User ID: ${id}`);
-    return jwt.sign({ id }, process.env.JWT_SECRET, {
+    console.log(`[authController.js] JWT_SECRET status: ${JWT_SECRET ? 'Available' : 'Missing'}`);
+    
+    return jwt.sign({ id }, JWT_SECRET, {
         expiresIn: '30d', // Token expires in 30 days
     });
 };

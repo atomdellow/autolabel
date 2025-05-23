@@ -10,6 +10,8 @@ Part of the Autobots collection, AutoLabel enables users to create annotations a
 - Image tagging support
 - Project-based organization
 - Export annotations for AI training
+- Custom model training and automatic annotation
+- Detection server status monitoring and management
 
 ## Getting Started
 

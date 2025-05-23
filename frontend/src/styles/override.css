@@ -1,0 +1,13 @@
+/* Override styles from style.css */
+body {
+  display: block !important; /* Override flex display from style.css */
+  place-items: initial !important; /* Remove centering from style.css */
+  min-height: 100vh !important;
+}
+
+#app {
+  max-width: none !important; /* Override max-width from style.css */
+  padding: 0 !important; /* Override padding from style.css */
+  text-align: left !important; /* Override text align from style.css */
+  margin: 0 !important;
+}
