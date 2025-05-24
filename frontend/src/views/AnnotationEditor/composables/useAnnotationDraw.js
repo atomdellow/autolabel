@@ -1,13 +1,17 @@
 import { ref } from 'vue';
+import { transformCoordinates, validateAnnotationData } from '../../../utils/annotationUtils';
 
 /**
  * Composable for handling annotation drawing functionality
+ * @param {Object} canvasComponent - Reference to the canvas component
+ * @param {Object} projectId - The project ID 
+ * @param {Object} imageId - The image ID
  * @param {Object} annotationStore - The annotation store for saving annotations
- * @param {Object} canvasCoordinates - The canvas coordinates composable
+ * @param {Object} toast - Toast notification service
  * @param {Object} zoomPan - The zoom pan composable
  * @param {Function} redrawCallback - Function to call when redraw is needed
  */
-export function useAnnotationDraw(annotationStore, canvasCoordinates, zoomPan, redrawCallback) {
+export function useAnnotationDraw(canvasComponent, projectId, imageId, annotationStore, toast, zoomPan, redrawCallback) {
   // Canvas context for drawing
   const canvasContext = ref(null);
   
@@ -23,7 +27,11 @@ export function useAnnotationDraw(annotationStore, canvasCoordinates, zoomPan, r
   const startPos = ref({ x: 0, y: 0 });
   const currentRectRaw = ref(null);
   const pendingAnnotationCoordinates = ref(null);
-    /**
+
+  // Debug flag to trace coordinates
+  const debugCoordinates = ref(false);
+  
+  /**
    * Sets the canvas context for drawing
    * @param {CanvasRenderingContext2D} ctx - The canvas context
    */
@@ -68,21 +76,25 @@ export function useAnnotationDraw(annotationStore, canvasCoordinates, zoomPan, r
       void canvas.offsetHeight;
       
       canvasContext.value.clearRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw any pending rectangles
+        // Draw any pending rectangles
       if (drawing && drawing.value === true && currentRectRaw && currentRectRaw.value) {
-        // Draw the current rectangle being created
+        // Draw the current rectangle being created - these are screen coordinates already
         canvasContext.value.strokeStyle = '#00AAFF';
         canvasContext.value.lineWidth = 2;
+        
+        const rect = currentRectRaw.value;
+        
+        // Draw the raw rectangle exactly as measured on screen
+        // These coordinates are already in screen space, no transformation needed
         canvasContext.value.strokeRect(
-          currentRectRaw.value.x,
-          currentRectRaw.value.y,
-          currentRectRaw.value.width,
-          currentRectRaw.value.height
+          rect.x,
+          rect.y,
+          rect.width,
+          rect.height
         );
         
         // Log successful drawing
-        console.log('Drew rectangle:', currentRectRaw.value);
+        console.log('Drew in-progress rectangle in screen space:', rect);
       }
       
       // Log successful redraw
@@ -128,8 +140,7 @@ export function useAnnotationDraw(annotationStore, canvasCoordinates, zoomPan, r
       height: 0
     };
   }
-  
-  /**
+    /**
    * Updates the current rectangle being drawn
    * @param {number} x - The current x coordinate
    * @param {number} y - The current y coordinate
@@ -145,20 +156,26 @@ export function useAnnotationDraw(annotationStore, canvasCoordinates, zoomPan, r
     const height = y - startY.value;
     
     // Update the current rectangle
-    currentRectRaw.value = {
+    // These are raw screen coordinates without any transformation
+    const rect = {
       x: width < 0 ? x : startX.value,
       y: height < 0 ? y : startY.value,
       width: Math.abs(width),
       height: Math.abs(height)
     };
-  }
-  
-  /**
+    
+    currentRectRaw.value = rect;
+    
+    // Debug drawing coordinates
+    console.log('Drawing rectangle (screen coords):', rect);
+  }  /**
    * Finishes the drawing operation
    * @returns {Object|null} The drawn rectangle or null if too small
-   */
-  function finishDrawing() {
+   */  function finishDrawing() {
+    console.log("finishDrawing called. Drawing state:", drawing.value, "Current rect:", currentRectRaw.value);
+    
     if (!drawing.value || !currentRectRaw.value) {
+      console.warn("No active drawing to finish");
       drawing.value = false;
       return null;
     }
@@ -171,12 +188,49 @@ export function useAnnotationDraw(annotationStore, canvasCoordinates, zoomPan, r
     
     // Check if the rectangle is large enough
     if (rect.width < 5 || rect.height < 5) {
+      console.log('Rectangle too small, ignoring:', rect);
       return null;
-    }
+    }      // STEP 1: Log our starting point - screen coordinates
+    console.log('DRAWING COMPLETE - Screen space rectangle:', rect);
     
-    // Set the pending coordinates for annotation creation
-    pendingAnnotationCoordinates.value = rect;
-    return rect;
+    // Check if zoomPan and its properties are defined to avoid errors
+    const zoomLevel = zoomPan?.zoomLevel?.value ?? 1; // Default to 1 if undefined
+    const panOffset = zoomPan?.panOffset?.value ?? { x: 0, y: 0 }; // Default to origin if undefined
+    
+    console.log(`Using zoom level: ${zoomLevel}, pan offset: (${panOffset.x}, ${panOffset.y})`);
+    
+    // STEP 2: Transform from screen space to image space
+    // This is the critical step - we need to account for zoom and pan
+    const imageSpaceCoords = transformCoordinates(
+      rect, 
+      zoomLevel, 
+      panOffset, 
+      'screenToImage'
+    );
+    
+    // STEP 3: Log the transformed coordinates
+    console.log('TRANSFORMED - Image space coordinates:', imageSpaceCoords);    // STEP 4: Create a properly formatted annotation with all required fields
+    const newAnnotation = validateAnnotationData({
+      _id: `new-annotation-${Date.now()}`, // Generate a unique ID with _id format
+      label: '', // Empty label - will be updated when user selects a class
+      x: Math.round(imageSpaceCoords.x),
+      y: Math.round(imageSpaceCoords.y),
+      width: Math.round(imageSpaceCoords.width),
+      height: Math.round(imageSpaceCoords.height),
+      confidence: 1.0, // For user-drawn annotations
+      layerOrder: annotationStore.currentAnnotations?.length || 0, // Put on top
+      color: '#00AAFF', // Default color
+      imageId: imageId.value, // Add the image ID
+      projectId: projectId.value // Add the project ID
+    }, null);
+    
+    // STEP 5: Store the formatted annotation for creation
+    pendingAnnotationCoordinates.value = newAnnotation;
+    
+    // STEP 6: Log the final annotation data
+    console.log('FINAL ANNOTATION DATA:', newAnnotation);
+    
+    return newAnnotation;
   }
   
   /**

@@ -24,8 +24,7 @@ export const useAnnotationStore = defineStore('annotation', {
       return Array.from(classSet).sort();
     },
   },
-  actions: {
-    async fetchAnnotations(imageId) {
+  actions: {    async fetchAnnotations(imageId) {
       if (!imageId) {
         this.annotations = [];
         return;
@@ -34,7 +33,9 @@ export const useAnnotationStore = defineStore('annotation', {
       this.error = null;
       try {
         const annotationsData = await getAnnotationsForImage(imageId);
-        this.annotations = annotationsData;
+        // Apply normalization to ensure consistent id/_id fields
+        this.annotations = this.normalizeAnnotations(annotationsData);
+        console.log(`Fetched ${this.annotations.length} annotations for image ${imageId}`);
       } catch (error) {
         this.error = error.message || 'Failed to load annotations';
         this.annotations = []; // Ensure annotations are cleared on error
@@ -91,29 +92,62 @@ export const useAnnotationStore = defineStore('annotation', {
       } finally {
         this.loading = false;
       }
-    },    
-    async createAnnotation(annotationData, projectId, imageId) {
+    },    async createAnnotation(annotationData, projectId, imageId) {
       this.loading = true;
       this.error = null;
       try {
-        console.log(`Store: Creating annotation for image: ${imageId}`);        // IMPORTANT: The backend endpoint /annotations/image/:imageId/set first DELETES ALL existing annotations
-        // for this image and then creates the new one(s). 
-        // Instead of just sending the new annotation, we'll send all existing ones plus the new one
-        // To ensure latest annotations are preserved correctly in the undo stack, place the new annotation at the end
-        const allAnnotations = [...this.annotations, annotationData];
-        const backendResponse = await setAllAnnotationsForImage(imageId, allAnnotations);
+        console.log(`Store: Creating annotation for image: ${imageId}`, annotationData);
+        
+        if (!imageId) {
+          throw new Error('No image ID provided for annotation creation');
+        }
+        
+        // Ensure all required fields are present and valid
+        const validatedAnnotation = {
+          ...annotationData,
+          id: annotationData.id || annotationData._id || `new-annotation-${Date.now()}`,
+          label: annotationData.label || 'New Annotation', // Required by backend
+          imageId: imageId,
+          x: Number(annotationData.x) || 0,
+          y: Number(annotationData.y) || 0,
+          width: Number(annotationData.width) || 0,
+          height: Number(annotationData.height) || 0,
+          confidence: annotationData.confidence || 1.0,
+          color: annotationData.color || '#00AAFF',
+          layerOrder: typeof annotationData.layerOrder === 'number' ? annotationData.layerOrder : this.annotations.length
+        };
+        
+        console.log('Validated annotation data:', validatedAnnotation);
+        
+        // Add new annotation to existing annotations array
+        const allAnnotations = [...this.annotations, validatedAnnotation];
+        
+        // Format annotations correctly for backend
+        const formattedAnnotations = allAnnotations.map(ann => ({
+          id: ann.id || ann._id, // Backend expects 'id'
+          label: ann.label || 'Unlabeled',
+          x: Number(ann.x) || 0,
+          y: Number(ann.y) || 0,
+          width: Number(ann.width) || 0, 
+          height: Number(ann.height) || 0,
+          confidence: ann.confidence || 1.0,
+          color: ann.color || '#00AAFF',
+          layerOrder: typeof ann.layerOrder === 'number' ? ann.layerOrder : 0
+        }));
+        
+        console.log('Sending annotations to server:', formattedAnnotations);
+        const backendResponse = await setAllAnnotationsForImage(imageId, formattedAnnotations);
 
         // Check if the backend response structure is as expected and contains the new annotation
         if (backendResponse && backendResponse.annotations && backendResponse.annotations.length > 0) {
           console.log(`Store: Received ${backendResponse.annotations.length} annotations from server after creation`);
           const newlyCreatedAnnotationFromServer = backendResponse.annotations[0]; // Assuming the first one is ours
 
-          if (newlyCreatedAnnotationFromServer && newlyCreatedAnnotationFromServer._id) {
-            console.log(`Store: Successfully created annotation with ID: ${newlyCreatedAnnotationFromServer._id}`);
+          if (newlyCreatedAnnotationFromServer && newlyCreatedAnnotationFromServer._id) {            console.log(`Store: Successfully created annotation with ID: ${newlyCreatedAnnotationFromServer._id}`);
             
             // Since the backend replaces ALL annotations, we should replace our local collection
             // to maintain consistency instead of just adding the new annotation
-            this.annotations = backendResponse.annotations;
+            this.annotations = this.normalizeAnnotations(backendResponse.annotations);
             console.log(`Store: Updated local annotations array with server response (${backendResponse.annotations.length} annotations)`);
 
             const imageStore = useImageStore();
@@ -191,8 +225,21 @@ export const useAnnotationStore = defineStore('annotation', {
           return null;
         }
         
+        // Ensure the annotation data has the correct format for the backend
+        const formattedAnnotationData = {
+          ...annotationData,
+          id: annotationData.id || annotationId, // Backend expects 'id' field
+          label: annotationData.label || 'Unlabeled',
+          x: Number(annotationData.x) || 0,
+          y: Number(annotationData.y) || 0,
+          width: Number(annotationData.width) || 0,
+          height: Number(annotationData.height) || 0
+        };
+        
+        console.log('Formatted annotation data for update:', formattedAnnotationData);
+        
         // Proceed with the update
-        const updatedAnnotationFromServer = await apiUpdateAnnotation(annotationId, annotationData);
+        const updatedAnnotationFromServer = await apiUpdateAnnotation(annotationId, formattedAnnotationData);
         if (updatedAnnotationFromServer && updatedAnnotationFromServer._id) {
           console.log(`Store: Successfully updated annotation with ID: ${annotationId}`);
           const index = this.annotations.findIndex(ann => ann._id === annotationId);
@@ -354,6 +401,69 @@ export const useAnnotationStore = defineStore('annotation', {
     clearAnnotations() {
       this.annotations = [];
       this.error = null;
-    }
+    },    updateAnnotationLabel(annotationId, className) {
+      if (!annotationId) {
+        console.warn('Cannot update annotation label: annotationId is null or undefined');
+        return;
+      }
+
+      try {
+        // Find the annotation in the local store
+        const annotation = this.annotations.find(ann => ann._id === annotationId);
+        
+        if (!annotation) {
+          console.warn(`Cannot update annotation label: Annotation with ID ${annotationId} not found`);
+          return;
+        }
+        
+        // Update the label field
+        console.log(`Updating annotation ${annotationId} label to "${className}"`);
+        
+        // Make sure to format the annotation data correctly for the backend
+        const updatedAnnotation = { 
+          ...annotation,
+          id: annotation.id || annotation._id, // Backend expects 'id'
+          label: className || 'Unlabeled'
+        };
+        
+        // Use the existing updateAnnotation method to update the server
+        return this.updateAnnotation(
+          annotationId, 
+          updatedAnnotation,
+          null,  // projectId - will be determined from context
+          null   // imageId - will be determined from context
+        );
+      } catch (error) {
+        console.error('Error updating annotation label:', error);
+        this.error = 'Failed to update annotation label';
+        return null;
+      }
+    },
+
+    // Add validation for annotation ID consistency
+    /**
+     * Normalize annotation data to ensure consistent id/_id usage
+     * @param {Array} annotations - Array of annotation objects
+     * @returns {Array} - Normalized annotation objects
+     */
+    normalizeAnnotations(annotations) {
+      if (!annotations) return [];
+      
+      return annotations.map(ann => {
+        // Ensure each annotation has both id and _id
+        const normalized = { ...ann };
+        if (normalized._id && !normalized.id) {
+          normalized.id = normalized._id;
+        } else if (normalized.id && !normalized._id) {
+          normalized._id = normalized.id;
+        } else if (!normalized._id && !normalized.id) {
+          // Generate a new ID if neither exists
+          const newId = `new-annotation-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          normalized._id = newId;
+          normalized.id = newId;
+        }
+        return normalized;
+      });
+    },
   },
 });

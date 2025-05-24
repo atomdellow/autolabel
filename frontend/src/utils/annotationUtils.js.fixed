@@ -1,0 +1,122 @@
+// Enhanced annotation utilities to fix coordinate transformation and validation issues
+
+/**
+ * Validate and clean annotation data to ensure it has all required fields
+ * 
+ * @param {Object} annotationData - The raw annotation data
+ * @param {Object} imageId - The ID of the image this annotation belongs to
+ * @returns {Object} Cleaned and validated annotation data
+ */
+export function validateAnnotationData(annotationData, imageId) {
+  // Make sure we have valid data to start with
+  if (!annotationData) {
+    throw new Error('No annotation data provided');
+  }
+  
+  // Ensure all required fields are present
+  const validatedAnnotation = {
+    ...annotationData,
+    id: annotationData.id || annotationData._id || `new-annotation-${Date.now()}`,
+    _id: annotationData._id || annotationData.id || `new-annotation-${Date.now()}`,
+    label: annotationData.label || 'New Annotation', // Required by backend
+    imageId: imageId,
+    x: Number(annotationData.x) || 0,
+    y: Number(annotationData.y) || 0,
+    width: Number(annotationData.width) || 0,
+    height: Number(annotationData.height) || 0,
+    confidence: annotationData.confidence || 1.0,
+    color: annotationData.color || '#00AAFF',
+    layerOrder: typeof annotationData.layerOrder === 'number' ? 
+      annotationData.layerOrder : 0
+  };
+  
+  return validatedAnnotation;
+}
+
+/**
+ * Transform annotation coordinates between screen space and image space
+ * 
+ * @param {Object} coords - The coordinates (x, y, width, height)
+ * @param {number} zoomLevel - Current zoom level
+ * @param {Object} panOffset - Current pan offset {x, y}
+ * @param {string} direction - Transformation direction: 'screenToImage' (default) or 'imageToScreen'
+ * @returns {Object} The transformed coordinates
+ */
+export function transformCoordinates(coords, zoomLevel, panOffset, direction = 'screenToImage') {
+  if (!coords) return null;
+  
+  // Get actual values with defaults for safety
+  const zoom = zoomLevel || 1;
+  const pan = panOffset || { x: 0, y: 0 };
+  
+  // Skip transformation if zoom is 1 and no pan offset
+  if (zoom === 1 && pan.x === 0 && pan.y === 0) {
+    return { 
+      x: coords.x, 
+      y: coords.y, 
+      width: coords.width, 
+      height: coords.height 
+    };
+  }
+  
+  let result;
+  
+  if (direction === 'screenToImage') {
+    // Convert from screen coordinates to image coordinates
+    result = {
+      x: (coords.x - pan.x) / zoom,
+      y: (coords.y - pan.y) / zoom,
+      width: coords.width / zoom,
+      height: coords.height / zoom
+    };
+    
+    console.log('TRANSFORM [Screen → Image]:', { 
+      original: coords, 
+      transformed: result,
+      zoom,
+      pan
+    });
+  } else {
+    // Convert from image coordinates to screen coordinates
+    result = {
+      x: coords.x * zoom + pan.x,
+      y: coords.y * zoom + pan.y,
+      width: coords.width * zoom,
+      height: coords.height * zoom
+    };
+    
+    console.log('TRANSFORM [Image → Screen]:', { 
+      original: coords, 
+      transformed: result,
+      zoom,
+      pan
+    });
+  }
+  
+  return result;
+}
+
+/**
+ * Enhance an annotation with proper ID field normalization
+ * 
+ * @param {Object} annotation - The annotation to enhance
+ * @returns {Object} Enhanced annotation with normalized id fields
+ */
+export function normalizeAnnotationIds(annotation) {
+  if (!annotation) return null;
+  
+  const enhanced = { ...annotation };
+  
+  // Ensure both id and _id fields exist
+  if (enhanced._id && !enhanced.id) {
+    enhanced.id = enhanced._id;
+  } else if (enhanced.id && !enhanced._id) {
+    enhanced._id = enhanced.id;
+  } else if (!enhanced._id && !enhanced.id) {
+    const newId = `new-annotation-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    enhanced.id = newId;
+    enhanced._id = newId;
+  }
+  
+  return enhanced;
+}

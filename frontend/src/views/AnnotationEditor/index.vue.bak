@@ -1,5 +1,4 @@
-<template>
-  <div class="annotation-editor-view">
+<template>  <div class="annotation-editor-view">
     <BreadcrumbNav>
       <router-link :to="{ name: 'Dashboard' }">Dashboard</router-link> &gt;
       <router-link :to="{ name: 'ProjectDetail', params: { projectId: projectId } }">Project: {{ projectStore.currentProject?.name }}</router-link> &gt;
@@ -23,7 +22,6 @@
         @image-loaded="onImageLoaded"
         @image-load-error="onImageLoadError"
         @redraw-requested="redrawCanvas"
-        @annotation-created="onAnnotationCreated"
       />
 
       <div class="side-panel">
@@ -148,8 +146,7 @@ function redrawCanvas() {
     }, 100);
     return;
   }
-    
-  try {
+    try {
     // Get canvas and its context
     const canvas = annotationDraw.canvasContext.value.canvas;
     const ctx = annotationDraw.canvasContext.value;
@@ -181,7 +178,7 @@ function redrawCanvas() {
       void canvasComponent.value.canvasRef.value.offsetHeight;
     }
   
-    if (annotations && annotations.length > 0) {
+  if (annotations && annotations.length > 0) {
       // Draw each annotation
       annotations.forEach(annotation => {
         // Set style based on selection state
@@ -200,9 +197,7 @@ function redrawCanvas() {
         const x = annotation.x;
         const y = annotation.y;
         const width = annotation.width;
-        const height = annotation.height;
-        
-        // Annotations are stored in image space coordinates and need to be 
+        const height = annotation.height;        // Annotations are stored in image space coordinates and need to be 
         // converted to screen space for display with the current zoom/pan settings
         
         // Use consistent transformation utility function with the correct direction
@@ -236,9 +231,7 @@ function redrawCanvas() {
           pan: zoomPan.panOffset.value
         });
       });
-    }
-    
-    // Draw any in-progress drawing rectangle
+    }    // Draw any in-progress drawing rectangle
     if (annotationDraw.drawing.value && annotationDraw.currentRectRaw.value) {
       ctx.strokeStyle = '#00AAFF';
       ctx.lineWidth = 2;
@@ -277,14 +270,10 @@ const annotationSelection = useAnnotationSelection(projectId, imageId, annotatio
 // Initialize detection functionality
 const detection = useDetection(projectId, imageId, annotationStore, toast, redrawCanvas);
 
-// Initialize tag management functionality
-const tagManagement = useTagManagement();
-
 // Define functions that are referenced in the template but not initialized above
 // For class handling
 const currentClassName = ref('');
 const showClassModal = ref(false);
-const pendingAnnotation = ref(null); // To store the newly created annotation
 
 function getColorForClass(className) {
   // Simple hash function to generate colors based on class name
@@ -303,69 +292,10 @@ function selectClass(className) {
 function confirmClassInput(className) {
   currentClassName.value = className;
   showClassModal.value = false;
-  
-  // If we have a pending annotation, update its class and save it
-  if (pendingAnnotation.value) {
-    console.log(`Updating annotation with class: ${className}`);
-    
-    // Create a new annotation with the class name
-    const newAnnotation = {
-      ...pendingAnnotation.value,
-      label: className,
-      color: getColorForClass(className)
-    };
-    
-    // Get existing annotations and add the new one
-    const existingAnnotations = [...annotationStore.currentAnnotations];
-    const allAnnotations = [...existingAnnotations, newAnnotation];
-    
-    // Use setAllAnnotationsForImage to preserve existing annotations while adding the new one
-    annotationStore.setAllAnnotationsForImage(imageId.value, allAnnotations, projectId.value)
-      .then(() => {
-        toast.success(`Created ${className} annotation`);
-        
-        // Add to undo stack if we have annotation history
-        if (annotationHistory) {
-          const createdAnnotation = annotationStore.currentAnnotations.find(ann => 
-            ann.x === newAnnotation.x && 
-            ann.y === newAnnotation.y && 
-            ann.width === newAnnotation.width && 
-            ann.height === newAnnotation.height
-          );
-          
-          if (createdAnnotation) {
-            annotationHistory.addToUndoStack({
-              type: 'CREATE',
-              timestamp: Date.now(),
-              annotationId: createdAnnotation._id,
-              annotationData: { ...createdAnnotation }
-            });
-          }
-        }
-        
-        redrawCanvas();
-      })
-      .catch(error => {
-        console.error('Error creating annotation:', error);
-        toast.error('Failed to create annotation');
-      });
-    
-    // Clear the pending annotation
-    pendingAnnotation.value = null;
-  }
 }
 
 function cancelClassInput() {
   showClassModal.value = false;
-  
-  // If the user cancels, clear the pending annotation without saving it
-  if (pendingAnnotation.value) {
-    console.log('Annotation creation cancelled');
-    pendingAnnotation.value = null;
-    
-    // Redraw to remove the temporary rectangle
-    redrawCanvas();
-  }
 }
 
 function onImageLoaded() {
@@ -380,19 +310,6 @@ function onImageLoadError() {
 function onImportComplete(annotations) {
   toast.success(`Imported ${annotations.length} annotations`);
   redrawCanvas();
-}
-
-function onAnnotationCreated(annotation) {
-  console.log("New annotation created:", annotation);
-  
-  // Store the pending annotation to be updated with a class
-  pendingAnnotation.value = annotation;
-  
-  // Show the class modal to let the user select a class
-  showClassModal.value = true;
-  
-  // Default to an empty class name to force user selection
-  currentClassName.value = '';
 }
 
 /**
@@ -412,7 +329,7 @@ window.debugCoordinateTransform = function() {
       const coords = { 
         x: annotation.x, 
         y: annotation.y, 
-        width: annotation.width,
+        width: annotation.width, 
         height: annotation.height 
       };
       
@@ -440,69 +357,62 @@ window.debugCoordinateTransform = function() {
   });
 };
 
-// Initialize Composable-related functionality
-// Add functions that depend on composables being initialized
+// Initialize all composables - this must be done before they're used in the template
+// Initialize coordinate system
+const zoomPan = useZoomPan();
+const canvasCoordinates = useCanvasCoordinates(zoomPan);
 
-// Fetch & initialize image data when component is mounted
-onMounted(async () => {
-  try {
-    // Fetch project data if not already loaded
-    if (!projectStore.currentProject || projectStore.currentProject._id !== projectId.value) {
-      await projectStore.fetchProject(projectId.value);
-      console.log('Fetched project data:', projectStore.currentProject);
-    }
-    
-    // Fetch images for the project if not already loaded
-    if (!imageStore.images || imageStore.images.length === 0) {
-      await imageStore.fetchImages(projectId.value);
-      console.log('Fetched images for project');
-    }
-      // Check if the image exists in the store
-    const image = imageStore.getImageById(imageId.value);
-    if (!image) {
-      console.error('Image not found in store:', imageId.value);
-      toast.error('Image not found');
-      return;
-    }
-    
-    // Use the image path to construct the URL
-    if (image.path) {
-      // The server serves images from the 'uploads' directory
-      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001';
-      // Ensure the path starts with /uploads if it doesn't already
-      const imagePath = image.path.startsWith('/uploads') ? image.path : `/uploads/${image.path.split('/').pop()}`;
-      imageUrl.value = `${apiBaseUrl}${imagePath}`;
-      console.log(`Constructed image URL: ${imageUrl.value}`);
-    } else {
-      console.error('Image data is missing or incomplete');
-      toast.error('Cannot load image: incomplete data');
-    }
-    
-    // Fetch annotations for this image
-    await annotationStore.fetchAnnotations(imageId.value, projectId.value);
-    console.log('Fetched annotations:', annotationStore.currentAnnotations);
-    
-  } catch (error) {
-    console.error('Error initializing annotation editor:', error);
-    toast.error('Failed to load annotation editor');
+// Initialize annotation functionalities
+const annotationDraw = useAnnotationDraw(canvasComponent, projectId, imageId, annotationStore, toast, zoomPan, redrawCanvas);
+const annotationEdit = useAnnotationEdit(canvasComponent, annotationStore, toast, zoomPan, redrawCanvas);
+const annotationHistory = useAnnotationHistory(projectId, imageId, annotationStore, redrawCanvas);
+const annotationSelection = useAnnotationSelection(projectId, imageId, annotationStore, toast, redrawCanvas);
+
+// Initialize detection functionality
+const detection = useDetection(projectId, imageId, annotationStore, toast, redrawCanvas);
+
+// Initialize tag management functionality
+const tagManagement = useTagManagement();
+
+// Define functions that are referenced in the template but not initialized above
+// For class handling
+const currentClassName = ref('');
+const showClassModal = ref(false);
+
+function getColorForClass(className) {
+  // Simple hash function to generate colors based on class name
+  let hash = 0;
+  for (let i = 0; i < className.length; i++) {
+    hash = className.charCodeAt(i) + ((hash << 5) - hash);
   }
-});
+  const hue = Math.abs(hash % 360);
+  return `hsl(${hue}, 70%, 50%)`;
+}
 
-// Add any necessary watchers
+function selectClass(className) {
+  currentClassName.value = className;
+}
 
-// Clean up on component unmount
-onUnmounted(() => {
-  // Clear any resources or references
-  console.log('Annotation editor component unmounted');
-});
+function confirmClassInput(className) {
+  currentClassName.value = className;
+  showClassModal.value = false;
+}
 
-// Helper functions to expose from composables for the template
-const highlightAnnotation = annotationSelection ? annotationSelection.highlightAnnotation : () => {};
-const unhighlightAnnotation = annotationSelection ? annotationSelection.unhighlightAnnotation : () => {};
-const deleteExistingAnnotation = annotationSelection ? annotationSelection.deleteExistingAnnotation : () => {};
-const deleteSelectedAnnotations = annotationSelection ? annotationSelection.deleteSelectedAnnotations : () => {};
+function cancelClassInput() {
+  showClassModal.value = false;
+}
+
+function onImageLoaded() {
+  console.log('Image loaded successfully');
+}
+
+function onImageLoadError() {
+  console.error('Failed to load image');
+  toast.error('Failed to load image');
+}
+
+function onImportComplete(annotations) {
+  toast.success(`Imported ${annotations.length} annotations`);
+  redrawCanvas();
+}
 </script>
-
-<style>
-/* Component styles are in the styles/index.css file */
-</style>

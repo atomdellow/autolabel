@@ -26,8 +26,7 @@ export function useAnnotationSelection(projectId, imageId, annotationStore, toas
   /**
    * Toggle selection of an annotation
    * @param {string} annotationId - The annotation ID to toggle selection for
-   */
-  function toggleAnnotationSelection(annotationId) {
+   */  function toggleAnnotationSelection(annotationId) {
     if (isAnnotationSelected(annotationId)) {
       // Remove from selected annotations
       selectedAnnotationIds.value = selectedAnnotationIds.value.filter(id => id !== annotationId);
@@ -36,7 +35,7 @@ export function useAnnotationSelection(projectId, imageId, annotationStore, toas
       selectedAnnotationIds.value.push(annotationId);
     }
   }
-
+  
   /**
    * Select all annotations
    */
@@ -47,8 +46,8 @@ export function useAnnotationSelection(projectId, imageId, annotationStore, toas
     if (selectedAnnotationIds.value.length === annotationStore.currentAnnotations.length) {
       selectedAnnotationIds.value = [];
     } else {
-      // Select all annotations
-      selectedAnnotationIds.value = annotationStore.currentAnnotations.map(ann => ann._id);
+      // Select all annotations - handle both _id and id fields
+      selectedAnnotationIds.value = annotationStore.currentAnnotations.map(ann => ann._id || ann.id);
     }
   }
 

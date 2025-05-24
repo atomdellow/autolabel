@@ -35,7 +35,7 @@ const routes = [
   },  {
     path: '/project/:projectId/image/:imageId/annotate',
     name: 'AnnotationEditor',
-    component: () => import(/* webpackChunkName: "annotation-editor" */ '../components/LazyAnnotationEditor.js'),
+    component: () => import(/* webpackChunkName: "annotation-editor" */ '../views/AnnotationEditor/index.vue'),
     meta: { requiresAuth: true },
     props: true,
   },

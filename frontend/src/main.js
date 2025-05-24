@@ -2,8 +2,8 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia'; // Import Pinia
 import App from './App.vue';
 import router from './router'; // Import router configuration
-// import './style.css';
-// import './styles/override.css'; // Override conflicting styles
+import './style.css';
+import './styles/override.css'; // Override conflicting styles
 
 // Import Toast Notification
 import Toast from 'vue-toastification';

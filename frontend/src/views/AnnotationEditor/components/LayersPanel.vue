@@ -3,21 +3,21 @@
     <h4>Layers (Annotations)</h4>
     <div class="layers-controls">
       <button @click="selectAllAnnotations" class="select-all-btn">Select All</button>
-      <button @click="deleteSelectedAnnotations" class="delete-selected-btn" :disabled="annotationSelection.selectedAnnotationIds.length === 0">
-        Delete Selected ({{ annotationSelection.selectedAnnotationIds.length }})
+      <button @click="deleteSelectedAnnotations" class="delete-selected-btn" :disabled="annotationSelection.selectedAnnotationIds.value.length === 0">
+        Delete Selected ({{ annotationSelection.selectedAnnotationIds.value.length }})
       </button>
     </div>
     <ul v-if="annotationStore.currentAnnotations.length">
       <li 
         v-for="(ann, index) in annotationStore.currentAnnotations" 
-        :key="ann._id"
+        :key="ann._id || ann.id"
         @mouseover="highlightAnnotation(ann)" 
         @mouseleave="unhighlightAnnotation"
         :class="{ 
-          'highlighted': isHighlighted(ann._id), 
-          'editing': isEditing(ann._id),
-          'has-history': hasAnnotationHistory(ann._id),
-          'selected': annotationSelection.isAnnotationSelected(ann._id)
+          'highlighted': isHighlighted(ann._id || ann.id), 
+          'editing': isEditing(ann._id || ann.id),
+          'has-history': hasAnnotationHistory(ann._id || ann.id),
+          'selected': annotationSelection.isAnnotationSelected(ann._id || ann.id)
         }"
         :style="{ borderLeftColor: getColorForClass(ann.label) }"
       >

@@ -1,10 +1,17 @@
 import apiClient from './api';
+import { validateAnnotationData, normalizeAnnotationIds } from '../utils/annotationUtils';
 
 // Get all annotations for an image
 export const getAnnotationsForImage = async (imageId) => {
   try {
     const response = await apiClient.get(`/annotations/image/${imageId}`);
-    return response.data;
+    
+    // Normalize all annotations to ensure consistent id fields
+    const normalizedAnnotations = response.data.map(annotation => 
+      normalizeAnnotationIds(annotation)
+    );
+    
+    return normalizedAnnotations;
   } catch (error) {
     throw error.response.data;
   }
@@ -53,8 +60,33 @@ export const createAnnotation = async (imageId, annotationData) => {
 // New function to set/replace all annotations for an image
 export const setAllAnnotationsForImage = async (imageId, annotationsArray) => {
   try {
-    const payload = { boxes: annotationsArray };
+    // Validate and normalize all annotations
+    const validatedAnnotations = annotationsArray.map(annotation => {
+      // Make sure each annotation has all required fields and consistent ID fields
+      const validated = validateAnnotationData(annotation, imageId);
+      return {
+        id: validated.id, // Backend expects 'id'
+        label: validated.label,
+        x: Number(validated.x),
+        y: Number(validated.y),
+        width: Number(validated.width), 
+        height: Number(validated.height),
+        confidence: validated.confidence,
+        color: validated.color,
+        layerOrder: validated.layerOrder
+      };
+    });
+    
+    const payload = { boxes: validatedAnnotations };
     const response = await apiClient.post(`/annotations/image/${imageId}/set`, payload);
+    
+    // Normalize all annotations in the response
+    if (response.data && response.data.annotations) {
+      response.data.annotations = response.data.annotations.map(annotation => 
+        normalizeAnnotationIds(annotation)
+      );
+    }
+    
     return response.data;
   } catch (error) {
     console.error('Error in setAllAnnotationsForImage service:', error.response ? error.response.data : error.message, error);

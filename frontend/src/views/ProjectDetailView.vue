@@ -204,16 +204,18 @@ onMounted(async () => {
   if (projectStore.currentProject) {
     await imageStore.fetchImages(projectId.value);
     await trainingStore.fetchTrainedModels(projectId.value);
-    trainingStore.clearTrainingState(); // Clear any previous job state, but keep config
-
-    // Check if there was an active job for this project (e.g. from backend state if implemented)
-    // For now, we assume if store has an active job status, try to get its details
-    // This part might need more robust handling with backend persisting job states
-    await trainingStore.fetchTrainingStatus(projectId.value); 
-    if (trainingStore.isTrainingActive && trainingStore.currentTrainingJob.jobId) {
-      startStatusPolling(projectId.value, trainingStore.currentTrainingJob.jobId);
+    trainingStore.clearTrainingState(); // Clear any previous job state, but keep config    // Check for active training jobs
+    try {
+      // Always use fetchTrainingStatus which is the correct method defined in the store
+      await trainingStore.fetchTrainingStatus(projectId.value);
+      
+      // Start polling if there's an active job
+      if (trainingStore.isTrainingActive && trainingStore.currentTrainingJob.jobId) {
+        startStatusPolling(projectId.value, trainingStore.currentTrainingJob.jobId);
+      }
+    } catch (error) {
+      console.error('Error fetching training status:', error);
     }
-
   } else {
     console.error("Project not found after loading.");
   }

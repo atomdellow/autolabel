@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue';
+import { transformCoordinates } from '../../../utils/annotationUtils';
 
 /**
  * Composable for handling coordinate transformations
@@ -15,7 +16,6 @@ export function useCanvasCoordinates() {
     naturalDimensions.value = dimensions;
     console.log('Natural dimensions set:', dimensions);
   }
-
   /**
    * Converts natural (original image) coordinates to screen coordinates with zoom and offset
    * @param {number} x - X coordinate in natural space
@@ -27,14 +27,14 @@ export function useCanvasCoordinates() {
    * @returns {Object} The transformed coordinates
    */
   function naturalToScreen(x, y, width, height, zoomLevel, panOffset) {
-    return {
-      x: x * zoomLevel + panOffset.x,
-      y: y * zoomLevel + panOffset.y,
-      width: width * zoomLevel,
-      height: height * zoomLevel
-    };
+    // Use the shared transformation utility for consistency
+    return transformCoordinates(
+      { x, y, width, height },
+      zoomLevel,
+      panOffset,
+      'imageToScreen'
+    );
   }
-  
   /**
    * Converts screen coordinates to natural (original image) coordinates
    * @param {number} x - X coordinate in screen space
@@ -46,14 +46,23 @@ export function useCanvasCoordinates() {
    * @returns {Object} The transformed coordinates
    */
   function screenToNatural(x, y, width, height, zoomLevel, panOffset) {
-    return {
-      x: (x - panOffset.x) / zoomLevel,
-      y: (y - panOffset.y) / zoomLevel,
-      width: width / zoomLevel,
-      height: height / zoomLevel
-    };
-  }
-  /**
+    // Use the shared transformation utility for consistency
+    const imageCoords = transformCoordinates(
+      { x, y, width, height },
+      zoomLevel,
+      panOffset,
+      'screenToImage'
+    );
+    
+    console.log('Canvas coordinates - Screen to image transform:', {
+      screen: { x, y, width, height },
+      zoom: zoomLevel,
+      pan: panOffset,
+      image: imageCoords
+    });
+    
+    return imageCoords;
+  }/**
    * Get canvas coordinates from a mouse event
    * @param {MouseEvent} event - The mouse event
    * @param {HTMLElement} canvasElement - The canvas element
@@ -74,18 +83,25 @@ export function useCanvasCoordinates() {
       const zoom = zoomLevel || 1;
       const panX = panOffset?.x || 0;
       const panY = panOffset?.y || 0;
-      
-      // Calculate the position relative to the canvas element
+        // Calculate the position relative to the canvas element
       const canvasX = event.clientX - canvasRect.left;
       const canvasY = event.clientY - canvasRect.top;
       
-      // Account for pan and zoom
-      // When we apply transform: translate(panX, panY) scale(zoom)
-      // we need to subtract the pan offset, then divide by zoom
-      const x = (canvasX - panX) / zoom;
-      const y = (canvasY - panY) / zoom;
+      // Use our shared transformation utility for consistency
+      const transformedCoords = transformCoordinates(
+        { x: canvasX, y: canvasY, width: 0, height: 0 },
+        zoom,
+        { x: panX, y: panY },
+        'screenToImage'
+      );
       
-      console.log(`Raw coords: (${canvasX}, ${canvasY}), Adjusted: (${x}, ${y}), Zoom: ${zoom}, Pan: (${panX}, ${panY})`);
+      const x = Math.round(transformedCoords.x);
+      const y = Math.round(transformedCoords.y);
+      
+      // For debugging purposes
+      console.log(`Mouse at screen (${canvasX.toFixed(1)}, ${canvasY.toFixed(1)}), ` + 
+                  `Image coords: (${x.toFixed(1)}, ${y.toFixed(1)}), ` + 
+                  `Zoom: ${zoom.toFixed(2)}, Pan: (${panX.toFixed(1)}, ${panY.toFixed(1)})`);
       
       return { x, y };
     } catch (error) {
@@ -93,7 +109,7 @@ export function useCanvasCoordinates() {
       return { x: 0, y: 0 };
     }
   }
-    /**
+  /**
    * Converts client coordinates to canvas coordinates
    * @param {number} clientX - The client X coordinate
    * @param {number} clientY - The client Y coordinate
@@ -109,11 +125,23 @@ export function useCanvasCoordinates() {
     }
     
     const canvasRect = canvasElement.getBoundingClientRect();
+      // First calculate screen position on the canvas
+    const screenX = clientX - canvasRect.left;
+    const screenY = clientY - canvasRect.top;
     
-    // Calculate the position relative to the canvas element with zoom and pan
-    // When we apply transform: translate(panX, panY) scale(zoom)
-    const x = (clientX - canvasRect.left - panOffset.x) / zoomLevel;
-    const y = (clientY - canvasRect.top - panOffset.y) / zoomLevel;
+    // Use our shared transformation utility for consistency
+    const transformedCoords = transformCoordinates(
+      { x: screenX, y: screenY, width: 0, height: 0 },
+      zoomLevel,
+      panOffset,
+      'screenToImage'
+    );
+    
+    const x = transformedCoords.x;
+    const y = transformedCoords.y;
+    
+    console.log(`Converting client (${clientX}, ${clientY}) to canvas: ` +
+                `screen (${screenX}, ${screenY}) → image (${x}, ${y})`);
     
     return { x, y };
   }

@@ -155,10 +155,14 @@ function handleMouseDown(event) {
     } else if (currentTool === 'pan') {
       if (typeof props.zoomPan.startPan === 'function') {
         props.zoomPan.startPan(coords);
-      }
-    } else if (currentTool === 'rectangle') {
+      }    } else if (currentTool === 'rectangle') {
       if (typeof props.annotationDraw.startDrawing === 'function') {
+        console.log("Starting drawing at", coords.x, coords.y);
         props.annotationDraw.startDrawing(coords.x, coords.y);
+        // Force immediate redraw to show starting point
+        if (typeof props.annotationDraw.redrawCanvas === 'function') {
+          props.annotationDraw.redrawCanvas();
+        }
       }
     }
   } catch (error) {
@@ -208,12 +212,14 @@ function handleMouseMove(event) {
     } else if (isPanning) {
       if (typeof props.zoomPan?.updatePan === 'function') {
         props.zoomPan.updatePan(coords);
-      }
-    } else if (isDrawing) {
+      }    } else if (isDrawing) {
       if (typeof props.annotationDraw?.updateDrawing === 'function') {
+        console.log("Updating drawing at", coords.x, coords.y);
         props.annotationDraw.updateDrawing(coords.x, coords.y);
+        // Request canvas redraw to show the rectangle being drawn
+        emit('redraw-requested');
       }
-    } else {
+    }else {
       // Hover behavior when not actively drawing/editing/panning
       if (typeof props.annotationEdit?.checkHoverState === 'function') {
         props.annotationEdit.checkHoverState(coords);
@@ -256,10 +262,21 @@ function handleMouseUp(event) {
     } else if (isPanning) {
       if (typeof props.zoomPan.endPan === 'function') {
         props.zoomPan.endPan();
-      }
-    } else if (isDrawing) {
+      }    } else if (isDrawing) {
       if (typeof props.annotationDraw.finishDrawing === 'function') {
-        props.annotationDraw.finishDrawing();
+        console.log("Finishing drawing, was drawing:", isDrawing);
+        try {
+          const newAnnotation = props.annotationDraw.finishDrawing();
+          if (newAnnotation) {
+            console.log("Created new annotation:", newAnnotation);
+            // Emit event to allow parent to know about the new annotation
+            emit('annotation-created', newAnnotation);
+          }
+        } catch (drawingError) {
+          console.error("Error finishing drawing:", drawingError);
+        }
+      } else {
+        console.warn("finishDrawing function not available on annotationDraw");
       }
     }
   } catch (error) {

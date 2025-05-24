@@ -1,5 +1,6 @@
 import { ref } from 'vue';
 import { useToast } from 'vue-toastification';
+import { testCoordinateTransform } from '../../../utils/annotationUtils';
 
 /**
  * Composable for handling zoom and pan functionality
@@ -202,9 +203,17 @@ export function useZoomPan(canvasCoordinates, redrawCallback) {
         if (redrawCallback) {
           console.log(`Redrawing at zoom level ${zoomLevel.value}x`);
           redrawCallback();
-          
-          // Force document repaint to ensure zoom changes are visible
+            // Force document repaint to ensure zoom changes are visible
           document.body.offsetHeight;
+          
+          // Test coordinate transformation at this zoom level with a sample annotation
+          try {
+            console.log(`Testing coordinate transformation at zoom ${zoomLevel.value}x`);
+            const sampleCoords = { x: 100, y: 100, width: 200, height: 150 };
+            testCoordinateTransform(sampleCoords, zoomLevel.value, panOffset.value);
+          } catch (error) {
+            console.error('Error testing coordinate transformation:', error);
+          }
         }
         
         stepIndex++;

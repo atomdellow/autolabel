@@ -69,6 +69,10 @@ const trainingService = {    // Training job management
     return api.get(path);
   },
   
+  getProjectTrainingStatus(projectId) {
+    return api.get(`/training/project/${projectId}/status`);
+  },
+  
   // Model management
   getModelDetails(modelId) {
     return api.get(`/training/models/${modelId}`);
@@ -97,8 +101,7 @@ const trainingService = {    // Training job management
       headers: {
         'Content-Type': 'multipart/form-data'
       }
-    });
-  },
+    });  },
   
   // Project data
   getProjectClasses(projectId) {
@@ -112,6 +115,11 @@ const trainingService = {    // Training job management
   verifyTrainingPrerequisites(projectId) {
     return api.get(`/training/project/${projectId}/prerequisites`);
   },
+  
+  // Fallback method to check if a project has active training jobs
+  getProjectTrainingJobStatus(projectId) {
+    return api.get(`/training/project/${projectId}/active-jobs`);
+  }
 };
 
 export default trainingService;

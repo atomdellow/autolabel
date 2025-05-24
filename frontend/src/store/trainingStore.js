@@ -250,6 +250,48 @@ export const useTrainingStore = defineStore('training', {
     },
 
     // Training status
+    async fetchTrainingStatus(projectId) {
+      this.isLoadingStatus = true;
+      this.statusError = null;
+      try {
+        if (!projectId) {
+          console.warn('No project ID provided to fetchTrainingStatus');
+          return null;
+        }
+        
+        // Get the latest training status for this project
+        const response = await trainingService.getProjectTrainingStatus(projectId);
+        
+        if (response.data && response.data.jobId) {
+          // Update current training job with fetched data
+          this.currentTrainingJob = {
+            ...this.currentTrainingJob,
+            jobId: response.data.jobId,
+            status: response.data.status || 'idle',
+            progress: response.data.progress || 0,
+            startTime: response.data.startTime || null,
+            endTime: response.data.endTime || null,
+            model: response.data.model || null
+          };
+          
+          // Add log messages if available
+          if (response.data.logs && Array.isArray(response.data.logs)) {
+            this.currentTrainingJob.logs = response.data.logs;
+          }
+          
+          return this.currentTrainingJob;
+        }
+        
+        return null;
+      } catch (err) {
+        this.statusError = err.response?.data?.message || err.message || 'Failed to fetch training status';
+        console.error('Error fetching training status:', err);
+        return null;
+      } finally {
+        this.isLoadingStatus = false;
+      }
+    },
+
     async checkTrainingStatus() {
       this.isLoadingStatus = true;
       this.statusError = null;
